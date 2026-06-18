@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+
+# FastAPI / uvicorn
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit these)
+*.json.secret
+credentials.json
+token.json
+garmin_credentials.env
+strava_credentials.env
+google_credentials.env
