@@ -8,8 +8,9 @@ from integrations.garmin.client import fetch_activities
 from integrations.garmin.export import push_workout
 from integrations.garmin.zwo import workout_to_zwo, zwo_filename
 from domain.fitness import compute_fitness, activities_to_daily_tss
+from domain.profile_store import load_profile, update_fitness
 from domain.workout import Sport
-from api.routes import _stub_profile, sessions_for_date
+from api.routes import sessions_for_date
 
 router = APIRouter(prefix="/api/v1/garmin")
 
@@ -35,7 +36,7 @@ def garmin_sync(days: int = 90) -> SyncResponse:
     Logs in with GARMIN_EMAIL/GARMIN_PASSWORD on first call, then reuses the
     saved session. Call this to refresh fitness after completing workouts.
     """
-    profile = _stub_profile()
+    profile = load_profile()
     try:
         activities = fetch_activities(days=days)
     except EnvironmentError as e:
@@ -45,6 +46,9 @@ def garmin_sync(days: int = 90) -> SyncResponse:
 
     daily_tss = activities_to_daily_tss(activities, profile.thresholds)
     fitness = compute_fitness(daily_tss)
+
+    # Persist the freshly computed fitness back into the saved profile
+    update_fitness(fitness.ctl, fitness.atl)
 
     return SyncResponse(
         activities_fetched=len(activities),
@@ -64,7 +68,7 @@ def garmin_push(day: date):
     Indoor cycling is skipped (use /garmin/zwo to download a .zwo instead);
     brick/multisport is not supported yet.
     """
-    profile = _stub_profile()
+    profile = load_profile()
     sessions = sessions_for_date(profile, day)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"No planned session on {day.isoformat()}")
@@ -88,7 +92,7 @@ def garmin_push(day: date):
 @router.get("/zwo/{day}")
 def garmin_zwo(day: date):
     """Download the .zwo file for the indoor cycling session on `day`."""
-    profile = _stub_profile()
+    profile = load_profile()
     sessions = sessions_for_date(profile, day)
     indoor = [w for w in sessions if w.sport == Sport.BIKE_INDOOR]
     if not indoor:

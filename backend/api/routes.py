@@ -6,6 +6,7 @@ from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal,
 from domain.zones import compute_zones, AthleteZones, Zone
 from domain.periodization import generate_week, get_phase, WeekPlan
 from domain.workout import Workout
+from domain.profile_store import load_profile, save_profile
 
 router = APIRouter(prefix="/api/v1")
 
@@ -31,43 +32,23 @@ class ZonesResponse(BaseModel):
     swim_pace: list[ZoneOut]
 
 
-# ── stub profile (replaced once UI + persistence layer exists) ────────────────
-
-def _stub_profile() -> AthleteProfile:
-    """
-    Placeholder athlete profile with representative values.
-    Replace with DB/config read once the profile endpoint accepts POST.
-    """
-    return AthleteProfile(
-        name="David",
-        goals=Goals(
-            race_date=date(2026, 10, 4),   # example 70.3 race date — update as needed
-            goal=RaceGoal.TARGET_TIME,
-            target_finish_seconds=int(4.5 * 3600),
-            weekly_hours_available=12.0,
-            limiter_discipline=Discipline.RUN,
-        ),
-        thresholds=Thresholds(
-            ftp_watts=250,                       # placeholder — replace with real value
-            run_threshold_pace_sec_per_km=285.0, # ~4:45/km placeholder
-            run_lthr=162,                        # placeholder
-            swim_css_sec_per_100m=95.0,          # ~1:35/100m placeholder
-            max_hr=203,
-        ),
-        fitness=Fitness(ctl=45.0, atl=50.0),
-    )
-
-
 # ── routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/profile", response_model=AthleteProfile)
 def get_profile():
-    return _stub_profile()
+    return load_profile()
+
+
+@router.put("/profile", response_model=AthleteProfile)
+def put_profile(profile: AthleteProfile):
+    """Replace the saved profile (goals + thresholds + fitness) and persist it."""
+    save_profile(profile)
+    return profile
 
 
 @router.get("/zones", response_model=ZonesResponse)
 def get_zones():
-    profile = _stub_profile()
+    profile = load_profile()
     try:
         zones = compute_zones(profile.thresholds)
     except ValueError as e:
@@ -83,7 +64,7 @@ def get_zones():
 
 @router.get("/plan/week")
 def get_week_plan(week_start: date | None = None, week_number: int = 1):
-    profile = _stub_profile()
+    profile = load_profile()
     plan = generate_week(profile, week_start=week_start, week_number=week_number)
     return plan.summary()
 
@@ -98,7 +79,7 @@ def sessions_for_date(profile: AthleteProfile, d: date) -> list[Workout]:
 @router.get("/plan/day")
 def get_day_plan(day: date):
     """Full structured detail of the session(s) on a given date (review screen)."""
-    profile = _stub_profile()
+    profile = load_profile()
     sessions = sessions_for_date(profile, day)
     return {"date": day.isoformat(), "sessions": [w.detail() for w in sessions]}
 
@@ -106,7 +87,7 @@ def get_day_plan(day: date):
 @router.get("/plan/tomorrow")
 def get_tomorrow_plan():
     """Tomorrow's session(s) — the review-before-publish view."""
-    profile = _stub_profile()
+    profile = load_profile()
     tomorrow = date.today() + timedelta(days=1)
     sessions = sessions_for_date(profile, tomorrow)
     return {"date": tomorrow.isoformat(), "sessions": [w.detail() for w in sessions]}
@@ -114,7 +95,7 @@ def get_tomorrow_plan():
 
 @router.get("/plan/phase")
 def get_current_phase():
-    profile = _stub_profile()
+    profile = load_profile()
     today = date.today()
     phase = get_phase(profile.goals.race_date, today)
     weeks_to_race = max(0, (profile.goals.race_date - today).days // 7)
