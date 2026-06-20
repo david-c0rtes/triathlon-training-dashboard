@@ -7,9 +7,18 @@ from pydantic import BaseModel, Field, computed_field
 
 class Sport(str, Enum):
     SWIM = "swim"
-    BIKE = "bike"
+    BIKE_OUTDOOR = "bike_outdoor"   # exports to Garmin Connect (.fit on watch)
+    BIKE_INDOOR = "bike_indoor"     # exports as .zwo for Rouvy/Zwift
     RUN = "run"
     BRICK = "brick"  # bike→run transition workout
+
+
+# Both bike variants behave identically for zones/TSS — only export differs.
+_BIKE_SPORTS = {Sport.BIKE_OUTDOOR, Sport.BIKE_INDOOR}
+
+
+def is_bike(sport: Sport) -> bool:
+    return sport in _BIKE_SPORTS
 
 
 class TargetType(str, Enum):
@@ -28,9 +37,20 @@ class Target(BaseModel):
 
 class WorkoutStep(BaseModel):
     name: str
-    duration_seconds: int
+    duration_seconds: int          # always set — used for TSS + estimated duration
     target: Target
     notes: str = ""
+    distance_meters: int | None = None  # if set, the step ends by distance, not time
+
+    def detail(self) -> dict:
+        return {
+            "kind": "step",
+            "name": self.name,
+            "duration_seconds": self.duration_seconds,
+            "distance_meters": self.distance_meters,
+            "target": self.target.model_dump(),
+            "notes": self.notes,
+        }
 
 
 class RepeatBlock(BaseModel):
@@ -41,15 +61,51 @@ class RepeatBlock(BaseModel):
     def total_duration_seconds(self) -> int:
         return self.repeat_count * sum(s.duration_seconds for s in self.steps)
 
+    def detail(self) -> dict:
+        return {
+            "kind": "repeat",
+            "repeat_count": self.repeat_count,
+            "steps": [s.detail() for s in self.steps],
+        }
+
 
 StepOrBlock = Union[WorkoutStep, RepeatBlock]
 
 
-def _step_tss(step: WorkoutStep, ftp: int, threshold_pace: float, css: float, sport: Sport) -> float:
+# HR zone midpoints as % of max HR — midpoint of each zone's % range.
+# Bike: 48-61 / 62-73 / 74-82 / 83-89 / 90-100
+BIKE_HR_ZONE_MIDPOINTS_PCT = {1: 0.545, 2: 0.675, 3: 0.780, 4: 0.860, 5: 0.950}
+# Run:  56-67 / 68-77 / 78-85 / 86-91 / 92-100
+RUN_HR_ZONE_MIDPOINTS_PCT  = {1: 0.615, 2: 0.725, 3: 0.815, 4: 0.885, 5: 0.960}
+
+
+def _step_tss(
+    step: WorkoutStep,
+    ftp: int,
+    threshold_pace: float,
+    css: float,
+    sport: Sport,
+    max_hr: int | None = None,
+    lthr: int | None = None,
+) -> float:
     """Estimate TSS contribution for a single step."""
     hours = step.duration_seconds / 3600.0
 
-    if sport == Sport.BIKE:
+    # HR_ZONE uses sport-specific midpoint tables anchored on max HR.
+    # IF = (zone midpoint % of max HR) / (LTHR % of max HR).
+    # Bike and run have separate zone boundaries; swim falls back to run zones.
+    # Default LTHR ≈ 80% of max HR when lthr is not explicitly provided.
+    if step.target.type == TargetType.HR_ZONE and step.target.zone and max_hr:
+        if is_bike(sport):
+            midpoints = BIKE_HR_ZONE_MIDPOINTS_PCT
+        else:
+            midpoints = RUN_HR_ZONE_MIDPOINTS_PCT
+        midpoint_pct = midpoints.get(step.target.zone, 0.70)
+        lthr_pct_of_max = (lthr / max_hr) if lthr else 0.80
+        intensity_factor = midpoint_pct / lthr_pct_of_max
+        return hours * intensity_factor ** 2 * 100
+
+    if is_bike(sport):
         if step.target.type == TargetType.POWER_ZONE and step.target.zone:
             # Mid-point watts per zone (6-zone model)
             zone_midpoints = {1: 0.45, 2: 0.65, 3: 0.83, 4: 0.98, 5: 1.13, 6: 1.30}
@@ -93,11 +149,22 @@ class Workout(BaseModel):
     _ftp: int = 0
     _threshold_pace: float = 0.0
     _css: float = 0.0
+    _max_hr: int | None = None
+    _lthr: int | None = None
 
-    def with_anchors(self, ftp: int, threshold_pace: float, css: float) -> "Workout":
+    def with_anchors(
+        self,
+        ftp: int,
+        threshold_pace: float,
+        css: float,
+        max_hr: int | None = None,
+        lthr: int | None = None,
+    ) -> "Workout":
         self._ftp = ftp
         self._threshold_pace = threshold_pace
         self._css = css
+        self._max_hr = max_hr
+        self._lthr = lthr
         return self
 
     @property
@@ -118,11 +185,13 @@ class Workout(BaseModel):
         tss = 0.0
         for item in self.steps:
             if isinstance(item, WorkoutStep):
-                tss += _step_tss(item, self._ftp, self._threshold_pace, self._css, self.sport)
+                tss += _step_tss(item, self._ftp, self._threshold_pace, self._css, self.sport,
+                                 self._max_hr, self._lthr)
             else:
                 for _ in range(item.repeat_count):
                     for step in item.steps:
-                        tss += _step_tss(step, self._ftp, self._threshold_pace, self._css, self.sport)
+                        tss += _step_tss(step, self._ftp, self._threshold_pace, self._css, self.sport,
+                                         self._max_hr, self._lthr)
         return round(tss, 1)
 
     def summary(self) -> dict:
@@ -132,4 +201,12 @@ class Workout(BaseModel):
             "date": self.scheduled_date.isoformat(),
             "duration_min": self.total_duration_minutes,
             "planned_tss": self.planned_tss(),
+        }
+
+    def detail(self) -> dict:
+        """Full structure for the review/edit screen."""
+        return {
+            **self.summary(),
+            "description": self.description,
+            "steps": [item.detail() for item in self.steps],
         }

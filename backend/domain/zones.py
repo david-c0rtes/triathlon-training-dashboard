@@ -47,22 +47,26 @@ def bike_power_zones(ftp: int) -> list[Zone]:
     return _build_zones(boundaries, names)
 
 
-def hr_zones(lthr: int) -> list[Zone]:
-    """
-    5-zone HR model anchored on Lactate Threshold HR (LTHR).
-    Boundaries as % of LTHR: <85 / 85-89 / 90-94 / 95-99 / ≥100
-    Values will be overridden once pulled from Garmin Connect.
-    """
-    names = [
-        "Z1 Recovery",
-        "Z2 Aerobic",
-        "Z3 Tempo",
-        "Z4 Threshold",
-        "Z5 VO2 Max",
-    ]
-    pcts = [0.0, 0.85, 0.90, 0.95, 1.00, 1.06]
-    boundaries = [lthr * p for p in pcts]
-    return _build_zones(boundaries, names)
+# HR zone boundaries as % of max HR — bike and run differ.
+# Low bound of Z1 is the lowest value in that zone's range.
+BIKE_HR_ZONE_PCTS = [0.48, 0.62, 0.74, 0.83, 0.90, 1.01]  # 6 boundaries for 5 zones
+RUN_HR_ZONE_PCTS  = [0.56, 0.68, 0.78, 0.86, 0.92, 1.01]
+
+_HR_ZONE_NAMES = ["Z1 Recovery", "Z2 Aerobic", "Z3 Tempo", "Z4 Threshold", "Z5 VO2 Max"]
+
+
+def bike_hr_zones(max_hr: int) -> list[Zone]:
+    """5-zone bike HR model anchored on max HR. Boundaries: 48/62/74/83/90/100%."""
+    boundaries = [max_hr * p for p in BIKE_HR_ZONE_PCTS]
+    boundaries[-1] = float("inf")
+    return _build_zones(boundaries, _HR_ZONE_NAMES)
+
+
+def run_hr_zones(max_hr: int) -> list[Zone]:
+    """5-zone run HR model anchored on max HR. Boundaries: 56/68/78/86/92/100%."""
+    boundaries = [max_hr * p for p in RUN_HR_ZONE_PCTS]
+    boundaries[-1] = float("inf")
+    return _build_zones(boundaries, _HR_ZONE_NAMES)
 
 
 def run_pace_zones(threshold_sec_per_km: float) -> list[Zone]:
@@ -110,18 +114,19 @@ def swim_css_zones(css_sec_per_100m: float) -> list[Zone]:
 @dataclass
 class AthleteZones:
     bike_power: list[Zone]
-    heart_rate: list[Zone]
+    bike_hr: list[Zone]
+    run_hr: list[Zone]
     run_pace: list[Zone]
     swim_pace: list[Zone]
 
 
 def compute_zones(thresholds: Thresholds) -> AthleteZones:
-    lthr = thresholds.run_lthr if thresholds.run_lthr else (int(thresholds.max_hr * 0.92) if thresholds.max_hr else None)
-    if lthr is None:
-        raise ValueError("Either run_lthr or max_hr must be set to compute HR zones.")
+    if not thresholds.max_hr:
+        raise ValueError("max_hr must be set to compute HR zones.")
     return AthleteZones(
         bike_power=bike_power_zones(thresholds.ftp_watts),
-        heart_rate=hr_zones(lthr),
+        bike_hr=bike_hr_zones(thresholds.max_hr),
+        run_hr=run_hr_zones(thresholds.max_hr),
         run_pace=run_pace_zones(thresholds.run_threshold_pace_sec_per_km),
         swim_pace=swim_css_zones(thresholds.swim_css_sec_per_100m),
     )

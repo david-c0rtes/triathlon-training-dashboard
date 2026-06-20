@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline
 from domain.zones import compute_zones, AthleteZones, Zone
 from domain.periodization import generate_week, get_phase, WeekPlan
+from domain.workout import Workout
 
 router = APIRouter(prefix="/api/v1")
 
@@ -24,7 +25,8 @@ class ZoneOut(BaseModel):
 
 class ZonesResponse(BaseModel):
     bike_power: list[ZoneOut]
-    heart_rate: list[ZoneOut]
+    bike_hr: list[ZoneOut]
+    run_hr: list[ZoneOut]
     run_pace: list[ZoneOut]
     swim_pace: list[ZoneOut]
 
@@ -50,6 +52,7 @@ def _stub_profile() -> AthleteProfile:
             run_threshold_pace_sec_per_km=285.0, # ~4:45/km placeholder
             run_lthr=162,                        # placeholder
             swim_css_sec_per_100m=95.0,          # ~1:35/100m placeholder
+            max_hr=203,
         ),
         fitness=Fitness(ctl=45.0, atl=50.0),
     )
@@ -71,7 +74,8 @@ def get_zones():
         raise HTTPException(status_code=422, detail=str(e))
     return ZonesResponse(
         bike_power=[ZoneOut.from_zone(z) for z in zones.bike_power],
-        heart_rate=[ZoneOut.from_zone(z) for z in zones.heart_rate],
+        bike_hr=[ZoneOut.from_zone(z) for z in zones.bike_hr],
+        run_hr=[ZoneOut.from_zone(z) for z in zones.run_hr],
         run_pace=[ZoneOut.from_zone(z) for z in zones.run_pace],
         swim_pace=[ZoneOut.from_zone(z) for z in zones.swim_pace],
     )
@@ -82,6 +86,30 @@ def get_week_plan(week_start: date | None = None, week_number: int = 1):
     profile = _stub_profile()
     plan = generate_week(profile, week_start=week_start, week_number=week_number)
     return plan.summary()
+
+
+def sessions_for_date(profile: AthleteProfile, d: date) -> list[Workout]:
+    """Generate the plan week containing `d` and return that day's session(s)."""
+    week_start = d - timedelta(days=d.weekday())
+    plan = generate_week(profile, week_start=week_start)
+    return [w for w in plan.workouts if w.scheduled_date == d]
+
+
+@router.get("/plan/day")
+def get_day_plan(day: date):
+    """Full structured detail of the session(s) on a given date (review screen)."""
+    profile = _stub_profile()
+    sessions = sessions_for_date(profile, day)
+    return {"date": day.isoformat(), "sessions": [w.detail() for w in sessions]}
+
+
+@router.get("/plan/tomorrow")
+def get_tomorrow_plan():
+    """Tomorrow's session(s) — the review-before-publish view."""
+    profile = _stub_profile()
+    tomorrow = date.today() + timedelta(days=1)
+    sessions = sessions_for_date(profile, tomorrow)
+    return {"date": tomorrow.isoformat(), "sessions": [w.detail() for w in sessions]}
 
 
 @router.get("/plan/phase")

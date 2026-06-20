@@ -71,7 +71,8 @@ def _min(n: int) -> int:
     return n * 60
 
 
-def build_swim_session(scheduled_date: date, phase: Phase, ftp: int, threshold_pace: float, css: float) -> Workout:
+def build_swim_session(scheduled_date: date, phase: Phase, ftp: int, threshold_pace: float,
+                       css: float, max_hr: int | None = None, lthr: int | None = None) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(10),
                      target=Target(type=TargetType.PACE_ZONE, zone=1))
 
@@ -91,12 +92,14 @@ def build_swim_session(scheduled_date: date, phase: Phase, ftp: int, threshold_p
         scheduled_date=scheduled_date,
         title=f"Swim Intervals ({phase.value})",
         steps=[wu, main_block, cd],
-    ).with_anchors(ftp, threshold_pace, css)
+    ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
     return workout
 
 
 def build_bike_session(scheduled_date: date, phase: Phase, long: bool,
-                       ftp: int, threshold_pace: float, css: float) -> Workout:
+                       ftp: int, threshold_pace: float, css: float,
+                       max_hr: int | None = None, lthr: int | None = None,
+                       sport: Sport = Sport.BIKE_OUTDOOR) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(15),
                      target=Target(type=TargetType.POWER_ZONE, zone=2))
     cd = WorkoutStep(name="Cool-down", duration_seconds=_min(10),
@@ -124,15 +127,16 @@ def build_bike_session(scheduled_date: date, phase: Phase, long: bool,
         steps = [wu, main, cd]
 
     return Workout(
-        sport=Sport.BIKE,
+        sport=sport,
         scheduled_date=scheduled_date,
         title=title,
         steps=steps,
-    ).with_anchors(ftp, threshold_pace, css)
+    ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
 
 
 def build_run_session(scheduled_date: date, phase: Phase, long: bool,
-                      ftp: int, threshold_pace: float, css: float) -> Workout:
+                      ftp: int, threshold_pace: float, css: float,
+                      max_hr: int | None = None, lthr: int | None = None) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(10),
                      target=Target(type=TargetType.PACE_ZONE, zone=1))
     cd = WorkoutStep(name="Cool-down", duration_seconds=_min(8),
@@ -164,11 +168,12 @@ def build_run_session(scheduled_date: date, phase: Phase, long: bool,
         scheduled_date=scheduled_date,
         title=title,
         steps=steps,
-    ).with_anchors(ftp, threshold_pace, css)
+    ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
 
 
 def build_brick_session(scheduled_date: date, phase: Phase,
-                        ftp: int, threshold_pace: float, css: float) -> Workout:
+                        ftp: int, threshold_pace: float, css: float,
+                        max_hr: int | None = None, lthr: int | None = None) -> Workout:
     """Bike→Run transition session."""
     steps = [
         WorkoutStep(name="Bike Warm-up", duration_seconds=_min(10),
@@ -183,7 +188,7 @@ def build_brick_session(scheduled_date: date, phase: Phase,
         scheduled_date=scheduled_date,
         title=f"Brick ({phase.value})",
         steps=steps,
-    ).with_anchors(ftp, threshold_pace, css)
+    ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
 
 
 # ── weekly plan ─────────────────────────────────────────────────────────────
@@ -234,28 +239,37 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     ftp = profile.thresholds.ftp_watts
     tp = profile.thresholds.run_threshold_pace_sec_per_km
     css = profile.thresholds.swim_css_sec_per_100m
+    max_hr = profile.thresholds.max_hr
+    lthr = profile.thresholds.run_lthr
 
     mon, tue, wed, thu, fri, sat, sun = [week_start + timedelta(days=i) for i in range(7)]
 
     workouts: list[Workout] = []
 
     # Tuesday — swim
-    workouts.append(build_swim_session(tue, phase, ftp, tp, css))
+    workouts.append(build_swim_session(tue, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
 
-    # Wednesday — bike
-    workouts.append(build_bike_session(wed, phase, long=False, ftp=ftp, threshold_pace=tp, css=css))
+    # Wednesday — bike intervals (default indoor — trainer-friendly)
+    workouts.append(build_bike_session(wed, phase, long=False, ftp=ftp, threshold_pace=tp,
+                                       css=css, max_hr=max_hr, lthr=lthr,
+                                       sport=Sport.BIKE_INDOOR))
 
     # Thursday — run
-    workouts.append(build_run_session(thu, phase, long=False, ftp=ftp, threshold_pace=tp, css=css))
+    workouts.append(build_run_session(thu, phase, long=False, ftp=ftp, threshold_pace=tp,
+                                      css=css, max_hr=max_hr, lthr=lthr))
 
     # Saturday — long ride (Base/Build) or brick (Peak)
     if phase == Phase.PEAK:
-        workouts.append(build_brick_session(sat, phase, ftp, tp, css))
+        workouts.append(build_brick_session(sat, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
     else:
-        workouts.append(build_bike_session(sat, phase, long=True, ftp=ftp, threshold_pace=tp, css=css))
+        # Saturday long ride — default outdoor
+        workouts.append(build_bike_session(sat, phase, long=True, ftp=ftp, threshold_pace=tp,
+                                           css=css, max_hr=max_hr, lthr=lthr,
+                                           sport=Sport.BIKE_OUTDOOR))
 
     # Sunday — long run (except Taper which is easy)
     workouts.append(build_run_session(sun, phase, long=(phase != Phase.TAPER),
-                                      ftp=ftp, threshold_pace=tp, css=css))
+                                      ftp=ftp, threshold_pace=tp, css=css,
+                                      max_hr=max_hr, lthr=lthr))
 
     return WeekPlan(week_start=week_start, phase=phase, target_tss=target_tss, workouts=workouts)

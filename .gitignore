@@ -15,9 +15,10 @@ venv/
 Thumbs.db
 
 # Secrets (never commit these)
+.env
 *.json.secret
 credentials.json
 token.json
 garmin_credentials.env
-strava_credentials.env
 google_credentials.env
+backend/.tokens/
