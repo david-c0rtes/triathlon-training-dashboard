@@ -5,8 +5,9 @@ from dataclasses import dataclass, field
 
 from domain.athlete import AthleteProfile
 from domain.workout import (
-    Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout
+    Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout, load_group
 )
+from domain.training_load import DEFAULT_TSS_PER_HOUR, STRENGTH_TSS_PER_HOUR
 
 
 class Phase(str, Enum):
@@ -39,30 +40,86 @@ def get_phase(race_date: date, today: date) -> Phase:
     return Phase.BASE
 
 
-def weekly_tss_target(profile: AthleteProfile, phase: Phase, week_number: int) -> float:
+PHASE_MODIFIERS = {
+    Phase.BASE: 0.85,
+    Phase.BUILD: 1.00,
+    Phase.PEAK: 1.05,
+    Phase.TAPER: 0.55,
+}
+
+
+def _ramp_for_weeks(weeks_to_race: float) -> float:
+    """CTL ramp rate per week — steeper when the race is closer."""
+    if weeks_to_race <= 8:
+        return 0.09
+    if weeks_to_race >= 24:
+        return 0.04
+    return 0.09 + (0.04 - 0.09) * (weeks_to_race - 8) / (24 - 8)
+
+
+def _tsb_multiplier(tsb: float) -> float:
+    """Scale weekly load by current form (TSB). Fatigued → reduce; fresh → push."""
+    if tsb < -25:
+        return 0.85
+    if tsb < -10:
+        return 1.00
+    if tsb < 5:
+        return 1.03
+    return 1.08
+
+
+def weighted_tss_per_hour(profile: AthleteProfile) -> float:
+    """Blended TSS/hour from the athlete's sport split (measured rates if available)."""
+    rates = dict(DEFAULT_TSS_PER_HOUR)
+    if profile.preferences.measured_tss_per_hour:
+        rates.update(profile.preferences.measured_tss_per_hour)
+    dist = profile.preferences.sport_distribution
+    return sum(frac * rates.get(sport, 50) for sport, frac in dist.items())
+
+
+def weekly_tss_target(profile: AthleteProfile, phase: Phase,
+                      weeks_to_race: float) -> tuple[float, str]:
     """
-    Base weekly TSS derived from available training hours.
-    Ramps 5% per week. Recovery weeks (every 4th) drop by 30%.
-    Tapers aggressively in peak/taper phases.
+    Compute the week's TSS target and a human-readable rationale.
+
+    CTL-anchored progressive build (ramp scales with weeks-to-race), capped by
+    the weighted available hours, reduced in recovery weeks (every 4th), and
+    modulated by current TSB. Cold-starts from an hours-based baseline.
     """
-    hours = profile.goals.weekly_hours_available
-    base_tss = hours * 55  # ~55 TSS/hr is a reasonable aerobic average
+    ctl = profile.fitness.ctl
+    tsb = profile.fitness.tsb
+    ramp = _ramp_for_weeks(weeks_to_race)
 
-    ramp = 1 + (0.05 * (week_number - 1))
-    tss = base_tss * ramp
+    ctl_based = max(ctl, 1.0) * 7 * (1 + ramp)
+    rate = weighted_tss_per_hour(profile)
+    hours_cap = profile.goals.weekly_hours_available * rate
 
-    if week_number % 4 == 0:
-        tss *= 0.70  # recovery week
+    if ctl < 10:
+        target = hours_cap * 0.6
+        anchor = "cold-start (low CTL) -> gentle hours-based baseline"
+    elif ctl_based <= hours_cap:
+        target = ctl_based
+        anchor = f"CTL-anchored (CTL {ctl:.0f} x 7 x +{ramp * 100:.0f}% ramp)"
+    else:
+        target = hours_cap
+        anchor = f"hours-capped ({profile.goals.weekly_hours_available:.0f}h x {rate:.0f} TSS/h)"
 
-    phase_modifiers = {
-        Phase.BASE: 0.80,
-        Phase.BUILD: 1.00,
-        Phase.PEAK: 1.10,
-        Phase.TAPER: 0.55,
-    }
-    tss *= phase_modifiers.get(phase, 1.0)
+    target *= PHASE_MODIFIERS.get(phase, 1.0)
 
-    return round(tss)
+    is_recovery = (round(weeks_to_race) % 4 == 0) and phase in (Phase.BASE, Phase.BUILD)
+    if is_recovery:
+        target *= 0.65
+
+    target *= _tsb_multiplier(tsb)
+
+    notes = [anchor, f"{phase.value} phase"]
+    if is_recovery:
+        notes.append("recovery week (-35%)")
+    if tsb < -25:
+        notes.append(f"TSB {tsb:.0f} fatigued -> -15%")
+    elif tsb >= 5:
+        notes.append(f"TSB {tsb:.0f} fresh -> load bump")
+    return round(target), "; ".join(notes)
 
 
 # ── session builders ────────────────────────────────────────────────────────
@@ -191,6 +248,50 @@ def build_brick_session(scheduled_date: date, phase: Phase,
     ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
 
 
+def build_strength_session(scheduled_date: date, minutes: int,
+                           ftp: int, threshold_pace: float, css: float,
+                           max_hr: int | None = None, lthr: int | None = None) -> Workout:
+    """A simple timed strength session — flat TSS, no structured steps."""
+    step = WorkoutStep(name="Strength", duration_seconds=_min(minutes),
+                       target=Target(type=TargetType.OPEN))
+    return Workout(
+        sport=Sport.STRENGTH,
+        scheduled_date=scheduled_date,
+        title="Strength",
+        steps=[step],
+    ).with_anchors(ftp, threshold_pace, css, max_hr=max_hr, lthr=lthr)
+
+
+# ── target distribution / scaling ────────────────────────────────────────────
+
+def _scale_workout(workout: Workout, factor: float) -> None:
+    """Scale every step's duration (and distance) in-place by `factor`."""
+    factor = max(0.3, min(3.0, factor))  # keep durations sane
+
+    def scale_step(s: WorkoutStep) -> None:
+        s.duration_seconds = max(60, round(s.duration_seconds * factor / 30) * 30)
+        if s.distance_meters:
+            s.distance_meters = max(100, round(s.distance_meters * factor / 50) * 50)
+
+    for item in workout.steps:
+        if isinstance(item, WorkoutStep):
+            scale_step(item)
+        else:
+            for s in item.steps:
+                scale_step(s)
+
+
+def _scale_group_to_target(workouts: list[Workout], group: str, target_tss: float) -> None:
+    """Scale all workouts in a load group so their combined TSS ≈ target_tss."""
+    members = [w for w in workouts if load_group(w.sport) == group]
+    base = sum(w.planned_tss() for w in members)
+    if base <= 0 or target_tss <= 0:
+        return
+    factor = target_tss / base
+    for w in members:
+        _scale_workout(w, factor)
+
+
 # ── weekly plan ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -198,6 +299,11 @@ class WeekPlan:
     week_start: date  # Monday
     phase: Phase
     target_tss: float
+    ctl: float = 0.0
+    atl: float = 0.0
+    tsb: float = 0.0
+    weeks_to_race: float = 0.0
+    rationale: str = ""
     workouts: list[Workout] = field(default_factory=list)
 
     @property
@@ -210,31 +316,34 @@ class WeekPlan:
             "phase": self.phase.value,
             "target_tss": self.target_tss,
             "planned_tss": self.planned_tss,
+            "fitness": {"ctl": self.ctl, "atl": self.atl, "tsb": round(self.tsb, 1)},
+            "weeks_to_race": round(self.weeks_to_race, 1),
+            "rationale": self.rationale,
             "workouts": [w.summary() for w in self.workouts],
         }
+
+
+# Preferred days for strength sessions (fall through as count increases)
+_STRENGTH_DAYS = [0, 4, 2, 5, 1, 3, 6]  # Mon, Fri, Wed, Sat, Tue, Thu, Sun
 
 
 def generate_week(profile: AthleteProfile, week_start: date | None = None,
                   week_number: int = 1) -> WeekPlan:
     """
-    Generate a structured training week for a 70.3 athlete.
+    Generate a fitness-aware structured training week for a 70.3 athlete.
 
-    Default week layout (Mon=rest day, adjustable later):
-      Mon: rest
-      Tue: swim
-      Wed: bike (intervals/aerobic)
-      Thu: run (intervals/easy)
-      Fri: rest or easy swim
-      Sat: long ride
-      Sun: long run (or brick in Build/Peak)
+    The weekly TSS target is CTL-anchored and TSB-modulated (see
+    weekly_tss_target), then distributed across sports per the athlete's
+    sport_distribution by scaling session durations. Strength is added as
+    simple timed sessions sized to its share of the target.
     """
     if week_start is None:
         today = date.today()
-        # Roll back to Monday
-        week_start = today - timedelta(days=today.weekday())
+        week_start = today - timedelta(days=today.weekday())  # roll back to Monday
 
     phase = get_phase(profile.goals.race_date, week_start)
-    target_tss = weekly_tss_target(profile, phase, week_number)
+    weeks_to_race = max(0.0, (profile.goals.race_date - week_start).days / 7)
+    target_tss, rationale = weekly_tss_target(profile, phase, weeks_to_race)
 
     ftp = profile.thresholds.ftp_watts
     tp = profile.thresholds.run_threshold_pace_sec_per_km
@@ -243,33 +352,44 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     lthr = profile.thresholds.run_lthr
 
     mon, tue, wed, thu, fri, sat, sun = [week_start + timedelta(days=i) for i in range(7)]
+    days = [mon, tue, wed, thu, fri, sat, sun]
+    dist = profile.preferences.sport_distribution
 
     workouts: list[Workout] = []
 
-    # Tuesday — swim
+    # Swim, bike, run base sessions
     workouts.append(build_swim_session(tue, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
-
-    # Wednesday — bike intervals (default indoor — trainer-friendly)
     workouts.append(build_bike_session(wed, phase, long=False, ftp=ftp, threshold_pace=tp,
-                                       css=css, max_hr=max_hr, lthr=lthr,
-                                       sport=Sport.BIKE_INDOOR))
-
-    # Thursday — run
+                                       css=css, max_hr=max_hr, lthr=lthr, sport=Sport.BIKE_INDOOR))
     workouts.append(build_run_session(thu, phase, long=False, ftp=ftp, threshold_pace=tp,
                                       css=css, max_hr=max_hr, lthr=lthr))
-
-    # Saturday — long ride (Base/Build) or brick (Peak)
     if phase == Phase.PEAK:
         workouts.append(build_brick_session(sat, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
     else:
-        # Saturday long ride — default outdoor
         workouts.append(build_bike_session(sat, phase, long=True, ftp=ftp, threshold_pace=tp,
-                                           css=css, max_hr=max_hr, lthr=lthr,
-                                           sport=Sport.BIKE_OUTDOOR))
-
-    # Sunday — long run (except Taper which is easy)
+                                           css=css, max_hr=max_hr, lthr=lthr, sport=Sport.BIKE_OUTDOOR))
     workouts.append(build_run_session(sun, phase, long=(phase != Phase.TAPER),
-                                      ftp=ftp, threshold_pace=tp, css=css,
-                                      max_hr=max_hr, lthr=lthr))
+                                      ftp=ftp, threshold_pace=tp, css=css, max_hr=max_hr, lthr=lthr))
 
-    return WeekPlan(week_start=week_start, phase=phase, target_tss=target_tss, workouts=workouts)
+    # Scale each sport group to its share of the weekly target
+    for group in ("swim", "bike", "run"):
+        _scale_group_to_target(workouts, group, target_tss * dist.get(group, 0.0))
+
+    # Strength — flat TSS, sized to its share, split across N sessions
+    n_strength = profile.preferences.strength_sessions_per_week
+    strength_target = target_tss * dist.get("strength", 0.0)
+    if n_strength > 0 and strength_target > 0:
+        total_minutes = (strength_target / STRENGTH_TSS_PER_HOUR) * 60
+        per_session_min = max(20, round(total_minutes / n_strength))
+        for i in range(n_strength):
+            day = days[_STRENGTH_DAYS[i % len(_STRENGTH_DAYS)]]
+            workouts.append(build_strength_session(day, per_session_min, ftp, tp, css,
+                                                   max_hr=max_hr, lthr=lthr))
+
+    workouts.sort(key=lambda w: w.scheduled_date)
+
+    return WeekPlan(
+        week_start=week_start, phase=phase, target_tss=target_tss,
+        ctl=profile.fitness.ctl, atl=profile.fitness.atl, tsb=profile.fitness.tsb,
+        weeks_to_race=weeks_to_race, rationale=rationale, workouts=workouts,
+    )

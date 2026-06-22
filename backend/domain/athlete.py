@@ -24,6 +24,18 @@ class Goals(BaseModel):
     limiter_discipline: Discipline | None = None  # discipline to emphasise
 
 
+class TrainingPreferences(BaseModel):
+    """How the athlete splits training and how strength is scheduled."""
+    # Fraction of weekly training time per sport — must roughly sum to 1.0.
+    sport_distribution: dict[str, float] = Field(
+        default_factory=lambda: {"swim": 0.15, "bike": 0.40, "run": 0.30, "strength": 0.15}
+    )
+    strength_sessions_per_week: int = Field(2, ge=0, le=7)
+    # Measured 90-day rolling avg TSS/hour per sport — None until enough data,
+    # then populated on Garmin sync. Falls back to DEFAULT_TSS_PER_HOUR.
+    measured_tss_per_hour: dict[str, float] | None = None
+
+
 class Thresholds(BaseModel):
     """User's personal performance anchors. All zones derive from these."""
     ftp_watts: int = Field(..., description="Functional Threshold Power (bike)")
@@ -56,3 +68,4 @@ class AthleteProfile(BaseModel):
     goals: Goals
     thresholds: Thresholds
     fitness: Fitness = Field(default_factory=Fitness)
+    preferences: TrainingPreferences = Field(default_factory=TrainingPreferences)

@@ -4,13 +4,16 @@ from enum import Enum
 from typing import Union
 from pydantic import BaseModel, Field, computed_field
 
+from domain.training_load import THRESHOLD_HOUR_TSS, STRENGTH_TSS_PER_HOUR
+
 
 class Sport(str, Enum):
     SWIM = "swim"
     BIKE_OUTDOOR = "bike_outdoor"   # exports to Garmin Connect (.fit on watch)
     BIKE_INDOOR = "bike_indoor"     # exports as .zwo for Rouvy/Zwift
     RUN = "run"
-    BRICK = "brick"  # bike→run transition workout
+    BRICK = "brick"      # bike→run transition workout
+    STRENGTH = "strength"  # simple timed session, flat TSS, no structured steps
 
 
 # Both bike variants behave identically for zones/TSS — only export differs.
@@ -19,6 +22,17 @@ _BIKE_SPORTS = {Sport.BIKE_OUTDOOR, Sport.BIKE_INDOOR}
 
 def is_bike(sport: Sport) -> bool:
     return sport in _BIKE_SPORTS
+
+
+def load_group(sport: Sport) -> str:
+    """Map a sport to its training-load group (for TSS distribution)."""
+    if sport == Sport.SWIM:
+        return "swim"
+    if sport == Sport.RUN:
+        return "run"
+    if sport == Sport.STRENGTH:
+        return "strength"
+    return "bike"  # bike indoor/outdoor + brick
 
 
 class TargetType(str, Enum):
@@ -79,6 +93,22 @@ BIKE_HR_ZONE_MIDPOINTS_PCT = {1: 0.545, 2: 0.675, 3: 0.780, 4: 0.860, 5: 0.950}
 RUN_HR_ZONE_MIDPOINTS_PCT  = {1: 0.615, 2: 0.725, 3: 0.815, 4: 0.885, 5: 0.960}
 
 
+def _threshold_hour(sport: Sport, step: WorkoutStep) -> float:
+    """TSS for one hour at threshold (IF=1.0) for this sport/step."""
+    if sport == Sport.SWIM:
+        return THRESHOLD_HOUR_TSS["swim"]
+    if sport == Sport.RUN:
+        return THRESHOLD_HOUR_TSS["run"]
+    if is_bike(sport):
+        return THRESHOLD_HOUR_TSS["bike"]
+    if sport == Sport.BRICK:
+        # weight each brick step by its target type (pace=run, power=bike)
+        if step.target.type == TargetType.PACE_ZONE:
+            return THRESHOLD_HOUR_TSS["run"]
+        return THRESHOLD_HOUR_TSS["bike"]
+    return THRESHOLD_HOUR_TSS["bike"]
+
+
 def _step_tss(
     step: WorkoutStep,
     ftp: int,
@@ -88,24 +118,29 @@ def _step_tss(
     max_hr: int | None = None,
     lthr: int | None = None,
 ) -> float:
-    """Estimate TSS contribution for a single step."""
+    """Estimate TSS contribution for a single step.
+
+    TSS = hours * IF**2 * threshold_hour_tss[sport].
+    Strength is flat (no IF) — just time on task.
+    """
     hours = step.duration_seconds / 3600.0
+
+    if sport == Sport.STRENGTH:
+        return hours * STRENGTH_TSS_PER_HOUR
+
+    thr_hour = _threshold_hour(sport, step)
 
     # HR_ZONE uses sport-specific midpoint tables anchored on max HR.
     # IF = (zone midpoint % of max HR) / (LTHR % of max HR).
-    # Bike and run have separate zone boundaries; swim falls back to run zones.
     # Default LTHR ≈ 80% of max HR when lthr is not explicitly provided.
     if step.target.type == TargetType.HR_ZONE and step.target.zone and max_hr:
-        if is_bike(sport):
-            midpoints = BIKE_HR_ZONE_MIDPOINTS_PCT
-        else:
-            midpoints = RUN_HR_ZONE_MIDPOINTS_PCT
+        midpoints = BIKE_HR_ZONE_MIDPOINTS_PCT if is_bike(sport) else RUN_HR_ZONE_MIDPOINTS_PCT
         midpoint_pct = midpoints.get(step.target.zone, 0.70)
         lthr_pct_of_max = (lthr / max_hr) if lthr else 0.80
         intensity_factor = midpoint_pct / lthr_pct_of_max
-        return hours * intensity_factor ** 2 * 100
+        return hours * intensity_factor ** 2 * thr_hour
 
-    if is_bike(sport):
+    if is_bike(sport) or (sport == Sport.BRICK and step.target.type != TargetType.PACE_ZONE):
         if step.target.type == TargetType.POWER_ZONE and step.target.zone:
             # Mid-point watts per zone (6-zone model)
             zone_midpoints = {1: 0.45, 2: 0.65, 3: 0.83, 4: 0.98, 5: 1.13, 6: 1.30}
@@ -114,26 +149,25 @@ def _step_tss(
             intensity_factor = step.target.pct_of_anchor
         else:
             intensity_factor = 0.60  # default: easy
-        return hours * intensity_factor ** 2 * 100
+        return hours * intensity_factor ** 2 * thr_hour
 
-    elif sport == Sport.RUN:
+    if sport == Sport.RUN or (sport == Sport.BRICK and step.target.type == TargetType.PACE_ZONE):
         if step.target.type == TargetType.PACE_ZONE and step.target.zone:
-            # Zone pace multipliers relative to threshold (sec/km ratio)
             zone_pace_ratios = {1: 1.40, 2: 1.27, 3: 1.13, 4: 1.03, 5: 0.95}
             pace_ratio = zone_pace_ratios.get(step.target.zone, 1.30)
         else:
             pace_ratio = 1.30
         intensity_factor = 1.0 / pace_ratio
-        return hours * intensity_factor ** 2 * 100
+        return hours * intensity_factor ** 2 * thr_hour
 
-    elif sport == Sport.SWIM:
+    if sport == Sport.SWIM:
         if step.target.type == TargetType.PACE_ZONE and step.target.zone:
             zone_pace_ratios = {1: 1.35, 2: 1.22, 3: 1.12, 4: 1.04, 5: 0.95}
             pace_ratio = zone_pace_ratios.get(step.target.zone, 1.25)
         else:
             pace_ratio = 1.25
         intensity_factor = 1.0 / pace_ratio
-        return hours * intensity_factor ** 2 * 100
+        return hours * intensity_factor ** 2 * thr_hour
 
     return 0.0
 

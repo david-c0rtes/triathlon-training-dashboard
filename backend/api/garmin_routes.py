@@ -7,8 +7,9 @@ from integrations.garmin import auth as garmin_auth
 from integrations.garmin.client import fetch_activities
 from integrations.garmin.export import push_workout
 from integrations.garmin.zwo import workout_to_zwo, zwo_filename
+from integrations.garmin.tss import measured_tss_per_hour
 from domain.fitness import compute_fitness, activities_to_daily_tss
-from domain.profile_store import load_profile, update_fitness
+from domain.profile_store import load_profile, save_profile, update_fitness
 from domain.workout import Sport
 from api.routes import sessions_for_date
 
@@ -47,8 +48,13 @@ def garmin_sync(days: int = 90) -> SyncResponse:
     daily_tss = activities_to_daily_tss(activities, profile.thresholds)
     fitness = compute_fitness(daily_tss)
 
-    # Persist the freshly computed fitness back into the saved profile
+    # Persist freshly computed fitness + 90-day rolling per-sport TSS/hour
     update_fitness(fitness.ctl, fitness.atl)
+    measured = measured_tss_per_hour(activities, profile.thresholds)
+    if measured:
+        profile = load_profile()
+        profile.preferences.measured_tss_per_hour = measured
+        save_profile(profile)
 
     return SyncResponse(
         activities_fetched=len(activities),
