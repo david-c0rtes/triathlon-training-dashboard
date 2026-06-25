@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -7,8 +7,8 @@ from integrations.garmin import auth as garmin_auth
 from integrations.garmin.client import fetch_activities
 from integrations.garmin.export import push_workout
 from integrations.garmin.zwo import workout_to_zwo, zwo_filename
-from integrations.garmin.tss import measured_tss_per_hour
-from domain.fitness import compute_fitness, activities_to_daily_tss
+from integrations.garmin.tss import measured_tss_per_hour, daily_tss_by_group
+from domain.fitness import compute_fitness, compute_fitness_series, activities_to_daily_tss
 from domain.profile_store import load_profile, save_profile, update_fitness
 from domain.workout import Sport
 from api.routes import sessions_for_date
@@ -63,6 +63,36 @@ def garmin_sync(days: int = 90) -> SyncResponse:
         atl=fitness.atl,
         tsb=fitness.tsb,
     )
+
+
+@router.get("/history")
+def garmin_history(days: int = 90):
+    """
+    Historical daily CTL/ATL/TSB series + per-day TSS by sport, for the
+    Performance page. Fetches an extra 42-day warmup so the displayed CTL is
+    accurate, then returns only the last `days` for display.
+    """
+    profile = load_profile()
+    try:
+        activities = fetch_activities(days=days + 42)
+    except EnvironmentError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Garmin Connect error: {e}")
+
+    daily_tss = activities_to_daily_tss(activities, profile.thresholds)
+    full_series = compute_fitness_series(daily_tss)
+    by_group = daily_tss_by_group(activities, profile.thresholds)
+
+    display_start = (date.today() - timedelta(days=days)).isoformat()
+    series = [pt for pt in full_series if pt["date"] >= display_start]
+    tss_days = [
+        {"date": d, **g}
+        for d, g in sorted(by_group.items())
+        if d >= display_start
+    ]
+
+    return {"days": days, "series": series, "tss_by_day": tss_days}
 
 
 # ── workout export ─────────────────────────────────────────────────────────────

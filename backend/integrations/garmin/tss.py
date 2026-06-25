@@ -50,6 +50,27 @@ def _hr_tss(activity: GarminActivity, thresholds: Thresholds, hours: float,
     return hours * default_if ** 2 * thr_hour
 
 
+def daily_tss_by_group(activities: list, thresholds: Thresholds) -> dict:
+    """
+    Per-day TSS broken down by discipline group for the TSS history bar chart.
+    Returns {date_iso: {swim, bike, run, strength, other}}.
+    """
+    group_map = {"bike": "bike", "run": "run", "swim": "swim", "strength": "strength"}
+    out: dict[str, dict[str, float]] = {}
+    for a in activities:
+        if a.duration <= 0:
+            continue
+        group = group_map.get(a.sport, "other")
+        day = a.start_date.date().isoformat()
+        bucket = out.setdefault(day, {"swim": 0.0, "bike": 0.0, "run": 0.0, "strength": 0.0, "other": 0.0})
+        bucket[group] += activity_tss(a, thresholds)
+    # round
+    for day, bucket in out.items():
+        for k in bucket:
+            bucket[k] = round(bucket[k], 1)
+    return out
+
+
 def measured_tss_per_hour(activities: list, thresholds: Thresholds) -> dict[str, float]:
     """
     Compute the athlete's actual average TSS/hour per sport group over the given

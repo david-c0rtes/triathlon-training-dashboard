@@ -3,11 +3,12 @@ from datetime import date, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
 
-from domain.athlete import AthleteProfile
+from domain.athlete import AthleteProfile, Fitness
 from domain.workout import (
     Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout, load_group
 )
 from domain.training_load import DEFAULT_TSS_PER_HOUR, STRENGTH_TSS_PER_HOUR
+from domain.fitness import advance_fitness
 
 
 class Phase(str, Enum):
@@ -18,32 +19,37 @@ class Phase(str, Enum):
     RACE = "Race"
 
 
+# Fixed phase windows counting back from race day (weeks-to-race thresholds).
+# Taper: last 2 weeks; Peak: the 2 before; Build: the 4 before; Base: everything earlier.
 PHASE_WEEKS = {
     Phase.TAPER: 2,
     Phase.PEAK: 2,
+    Phase.BUILD: 4,
 }
+_TAPER_END = PHASE_WEEKS[Phase.TAPER]                                   # 2
+_PEAK_END = _TAPER_END + PHASE_WEEKS[Phase.PEAK]                        # 4
+_BUILD_END = _PEAK_END + PHASE_WEEKS[Phase.BUILD]                       # 8
 
 
 def get_phase(race_date: date, today: date) -> Phase:
     weeks_out = (race_date - today).days / 7
     if weeks_out <= 0:
         return Phase.RACE
-    if weeks_out <= PHASE_WEEKS[Phase.TAPER]:
+    if weeks_out <= _TAPER_END:
         return Phase.TAPER
-    if weeks_out <= PHASE_WEEKS[Phase.TAPER] + PHASE_WEEKS[Phase.PEAK]:
+    if weeks_out <= _PEAK_END:
         return Phase.PEAK
-    # Total build period is ~40% of remaining time, base is the rest
-    total_prep_weeks = weeks_out - sum(PHASE_WEEKS.values())
-    build_weeks = round(total_prep_weeks * 0.40)
-    if weeks_out <= PHASE_WEEKS[Phase.TAPER] + PHASE_WEEKS[Phase.PEAK] + build_weeks:
+    if weeks_out <= _BUILD_END:
         return Phase.BUILD
     return Phase.BASE
 
 
+# The CTL-anchored ramp already drives progression, so build phases sit at/above
+# maintenance (>= 1.0). Sub-1.0 here would detrain. Only taper cuts load.
 PHASE_MODIFIERS = {
-    Phase.BASE: 0.85,
-    Phase.BUILD: 1.00,
-    Phase.PEAK: 1.05,
+    Phase.BASE: 1.00,
+    Phase.BUILD: 1.08,
+    Phase.PEAK: 1.10,
     Phase.TAPER: 0.55,
 }
 
@@ -78,16 +84,20 @@ def weighted_tss_per_hour(profile: AthleteProfile) -> float:
 
 
 def weekly_tss_target(profile: AthleteProfile, phase: Phase,
-                      weeks_to_race: float) -> tuple[float, str]:
+                      weeks_to_race: float, fitness: "Fitness | None" = None) -> tuple[float, str]:
     """
     Compute the week's TSS target and a human-readable rationale.
 
     CTL-anchored progressive build (ramp scales with weeks-to-race), capped by
     the weighted available hours, reduced in recovery weeks (every 4th), and
     modulated by current TSB. Cold-starts from an hours-based baseline.
+
+    `fitness` overrides profile.fitness (used by forward simulation so each
+    projected week is planned against its simulated CTL/ATL/TSB).
     """
-    ctl = profile.fitness.ctl
-    tsb = profile.fitness.tsb
+    fit = fitness or profile.fitness
+    ctl = fit.ctl
+    tsb = fit.tsb
     ramp = _ramp_for_weeks(weeks_to_race)
 
     ctl_based = max(ctl, 1.0) * 7 * (1 + ramp)
@@ -328,7 +338,7 @@ _STRENGTH_DAYS = [0, 4, 2, 5, 1, 3, 6]  # Mon, Fri, Wed, Sat, Tue, Thu, Sun
 
 
 def generate_week(profile: AthleteProfile, week_start: date | None = None,
-                  week_number: int = 1) -> WeekPlan:
+                  week_number: int = 1, fitness: Fitness | None = None) -> WeekPlan:
     """
     Generate a fitness-aware structured training week for a 70.3 athlete.
 
@@ -336,14 +346,17 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     weekly_tss_target), then distributed across sports per the athlete's
     sport_distribution by scaling session durations. Strength is added as
     simple timed sessions sized to its share of the target.
+
+    `fitness` overrides profile.fitness (used by generate_plan's forward sim).
     """
     if week_start is None:
         today = date.today()
         week_start = today - timedelta(days=today.weekday())  # roll back to Monday
 
+    fit = fitness or profile.fitness
     phase = get_phase(profile.goals.race_date, week_start)
     weeks_to_race = max(0.0, (profile.goals.race_date - week_start).days / 7)
-    target_tss, rationale = weekly_tss_target(profile, phase, weeks_to_race)
+    target_tss, rationale = weekly_tss_target(profile, phase, weeks_to_race, fitness=fit)
 
     ftp = profile.thresholds.ftp_watts
     tp = profile.thresholds.run_threshold_pace_sec_per_km
@@ -390,6 +403,86 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
 
     return WeekPlan(
         week_start=week_start, phase=phase, target_tss=target_tss,
-        ctl=profile.fitness.ctl, atl=profile.fitness.atl, tsb=profile.fitness.tsb,
+        ctl=fit.ctl, atl=fit.atl, tsb=fit.tsb,
         weeks_to_race=weeks_to_race, rationale=rationale, workouts=workouts,
     )
+
+
+# ── full plan to race ─────────────────────────────────────────────────────────
+
+def _week_daily_tss(plan: WeekPlan) -> list[float]:
+    """7 daily TSS values (Mon→Sun) for a generated week, for forward simulation."""
+    by_day = {plan.week_start + timedelta(days=i): 0.0 for i in range(7)}
+    for w in plan.workouts:
+        if w.scheduled_date in by_day:
+            by_day[w.scheduled_date] += w.planned_tss()
+    return [by_day[plan.week_start + timedelta(days=i)] for i in range(7)]
+
+
+@dataclass
+class Plan:
+    race_date: date
+    start_week: date
+    weeks: list[WeekPlan] = field(default_factory=list)
+
+    @property
+    def projected_peak_ctl(self) -> float:
+        return round(max((w.ctl for w in self.weeks), default=0.0), 1)
+
+    @property
+    def race_day_fitness(self) -> dict:
+        if not self.weeks:
+            return {"ctl": 0.0, "atl": 0.0, "tsb": 0.0}
+        # end-of-plan projected fitness = last week's start rolled forward one week
+        last = self.weeks[-1]
+        end = advance_fitness(last.ctl, last.atl, _week_daily_tss(last))
+        return {"ctl": end.ctl, "atl": end.atl, "tsb": round(end.tsb, 1)}
+
+    def summary(self) -> dict:
+        return {
+            "race_date": self.race_date.isoformat(),
+            "start_week": self.start_week.isoformat(),
+            "total_weeks": len(self.weeks),
+            "projected_peak_ctl": self.projected_peak_ctl,
+            "race_day_fitness": self.race_day_fitness,
+            "weeks": [
+                {
+                    "week_start": w.week_start.isoformat(),
+                    "phase": w.phase.value,
+                    "weeks_to_race": round(w.weeks_to_race, 1),
+                    "target_tss": w.target_tss,
+                    "planned_tss": w.planned_tss,
+                    "ctl": w.ctl,
+                    "atl": w.atl,
+                    "tsb": round(w.tsb, 1),
+                    "rationale": w.rationale,
+                }
+                for w in self.weeks
+            ],
+        }
+
+
+def generate_plan(profile: AthleteProfile, start_week: date | None = None) -> Plan:
+    """
+    Generate the full periodized plan from the current week to race week,
+    forward-simulating CTL/ATL so each week is planned against its projected
+    fitness (not today's). Returns week-level summaries (no per-step detail).
+    """
+    if start_week is None:
+        today = date.today()
+        start_week = today - timedelta(days=today.weekday())
+
+    plan = Plan(race_date=profile.goals.race_date, start_week=start_week)
+
+    fitness = profile.fitness
+    week_start = start_week
+    guard = 0
+    while week_start <= profile.goals.race_date and guard < 60:
+        week = generate_week(profile, week_start=week_start, fitness=fitness)
+        plan.weeks.append(week)
+        # roll fitness forward through this week's daily load
+        fitness = advance_fitness(fitness.ctl, fitness.atl, _week_daily_tss(week))
+        week_start += timedelta(days=7)
+        guard += 1
+
+    return plan

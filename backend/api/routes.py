@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline
 from domain.zones import compute_zones, AthleteZones, Zone
-from domain.periodization import generate_week, get_phase, WeekPlan
+from domain.periodization import generate_week, generate_plan, get_phase, WeekPlan
 from domain.workout import Workout
 from domain.profile_store import load_profile, save_profile
 
@@ -69,6 +69,13 @@ def get_week_plan(week_start: date | None = None, week_number: int = 1):
     return plan.summary()
 
 
+@router.get("/plan/full")
+def get_full_plan():
+    """Full periodized plan from this week to race day (week-level summaries)."""
+    profile = load_profile()
+    return generate_plan(profile).summary()
+
+
 def sessions_for_date(profile: AthleteProfile, d: date) -> list[Workout]:
     """Generate the plan week containing `d` and return that day's session(s)."""
     week_start = d - timedelta(days=d.weekday())
@@ -100,3 +107,27 @@ def get_current_phase():
     phase = get_phase(profile.goals.race_date, today)
     weeks_to_race = max(0, (profile.goals.race_date - today).days // 7)
     return {"phase": phase.value, "weeks_to_race": weeks_to_race}
+
+
+@router.get("/insights")
+def get_insights():
+    """AI coaching insight interpreting the current fitness + plan (Claude API)."""
+    from services.insights import generate_insight, insights_available
+    if not insights_available():
+        raise HTTPException(
+            status_code=503,
+            detail="AI insights unavailable — set ANTHROPIC_API_KEY in backend/.env",
+        )
+    profile = load_profile()
+    week = generate_week(profile)
+    context = {
+        "ctl": week.ctl, "atl": week.atl, "tsb": round(week.tsb, 1),
+        "phase": week.phase.value, "weeks_to_race": round(week.weeks_to_race, 1),
+        "target_tss": week.target_tss, "planned_tss": week.planned_tss,
+        "rationale": week.rationale,
+    }
+    try:
+        insight = generate_insight(context)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Insight generation failed: {e}")
+    return {"insight": insight, "context": context}

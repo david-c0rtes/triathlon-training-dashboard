@@ -23,3 +23,4 @@ garmin_credentials.env
 google_credentials.env
 backend/.tokens/
 backend/data/
+github-claude access.txt
