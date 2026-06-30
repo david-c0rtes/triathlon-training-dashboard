@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
 import { Performance } from "./pages/Performance";
+import { Settings } from "./pages/Settings";
 import { Placeholder } from "./pages/Placeholder";
 
 export default function App() {
@@ -13,7 +14,7 @@ export default function App() {
           <Route path="workout" element={<Placeholder title="Workout" />} />
           <Route path="calendar" element={<Placeholder title="Calendar" />} />
           <Route path="performance" element={<Performance />} />
-          <Route path="settings" element={<Placeholder title="Settings" />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -1,6 +1,6 @@
 import type {
   AthleteProfile, FullPlan, WeekPlan, DayPlan, GarminStatus,
-  FitnessHistory, Insight,
+  FitnessHistory, Insight, ZonesResponse, RaceTypeOption,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
@@ -18,8 +18,21 @@ async function post<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${PREFIX}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`PUT ${path} failed: ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
 export const api = {
   profile: () => get<AthleteProfile>("/profile"),
+  saveProfile: (p: AthleteProfile) => put<AthleteProfile>("/profile", p),
+  zones: () => get<ZonesResponse>("/zones"),
+  raceTypes: () => get<RaceTypeOption[]>("/race-types"),
   fullPlan: () => get<FullPlan>("/plan/full"),
   week: (weekStart?: string) =>
     get<WeekPlan>(`/plan/week${weekStart ? `?week_start=${weekStart}` : ""}`),

@@ -17,12 +17,28 @@ export interface Thresholds {
   max_hr: number | null;
 }
 
+export interface CustomLeg {
+  discipline: string;
+  distance_m: number;
+}
+
 export interface Goals {
   race_date: string;
+  race_type: string;
+  custom_legs: CustomLeg[] | null;
   goal: string;
   target_finish_seconds: number | null;
   weekly_hours_available: number;
   limiter_discipline: string | null;
+}
+
+export interface RaceTypeOption {
+  key: string;
+  label: string;
+  swim_m: number;
+  bike_m: number;
+  run_m: number;
+  description: string;
 }
 
 export interface TrainingPreferences {
@@ -129,4 +145,19 @@ export interface FitnessHistory {
 export interface Insight {
   insight: string;
   context: Record<string, unknown>;
+}
+
+export interface ZoneOut {
+  number: number;
+  name: string;
+  low: number;
+  high: number | null;
+}
+
+export interface ZonesResponse {
+  bike_power: ZoneOut[];
+  bike_hr: ZoneOut[];
+  run_hr: ZoneOut[];
+  run_pace: ZoneOut[];
+  swim_pace: ZoneOut[];
 }

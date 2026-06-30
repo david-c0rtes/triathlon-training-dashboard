@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline
+from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline, RACE_TYPES
 from domain.zones import compute_zones, AthleteZones, Zone
 from domain.periodization import generate_week, generate_plan, get_phase, WeekPlan
 from domain.workout import Workout
@@ -13,15 +13,19 @@ router = APIRouter(prefix="/api/v1")
 
 # ── request / response schemas ───────────────────────────────────────────────
 
+import math
+
+
 class ZoneOut(BaseModel):
     number: int
     name: str
     low: float
-    high: float
+    high: float | None  # None means "and up" (open-ended top zone)
 
     @classmethod
     def from_zone(cls, z: Zone) -> "ZoneOut":
-        return cls(number=z.number, name=z.name, low=round(z.low, 1), high=round(z.high, 1))
+        high = None if math.isinf(z.high) else round(z.high, 1)
+        return cls(number=z.number, name=z.name, low=round(z.low, 1), high=high)
 
 
 class ZonesResponse(BaseModel):
@@ -44,6 +48,12 @@ def put_profile(profile: AthleteProfile):
     """Replace the saved profile (goals + thresholds + fitness) and persist it."""
     save_profile(profile)
     return profile
+
+
+@router.get("/race-types")
+def get_race_types():
+    """The selectable race types with distances (single source of truth for the UI)."""
+    return [{"key": k, **v} for k, v in RACE_TYPES.items()]
 
 
 @router.get("/zones", response_model=ZonesResponse)
