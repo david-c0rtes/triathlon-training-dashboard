@@ -226,7 +226,7 @@ def get_tomorrow_plan():
 def get_current_phase():
     profile = load_profile()
     today = date.today()
-    phase = get_phase(profile.goals.race_date, today)
+    phase = get_phase(profile, today)
     weeks_to_race = max(0, (profile.goals.race_date - today).days // 7)
     return {"phase": phase.value, "weeks_to_race": weeks_to_race}
 

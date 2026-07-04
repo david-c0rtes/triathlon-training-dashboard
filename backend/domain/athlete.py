@@ -91,6 +91,17 @@ class Goals(BaseModel):
         return self
 
 
+def race_distances(goals: Goals) -> tuple[int, int, int]:
+    """Return (swim_m, bike_m, run_m) for the athlete's chosen race — preset or custom."""
+    if goals.race_type == RaceType.CUSTOM:
+        legs = goals.custom_legs or []
+        def total(d: Discipline) -> int:
+            return sum(leg.distance_m for leg in legs if leg.discipline == d)
+        return total(Discipline.SWIM), total(Discipline.BIKE), total(Discipline.RUN)
+    info = RACE_TYPES[goals.race_type.value]
+    return info["swim_m"], info["bike_m"], info["run_m"]
+
+
 class TrainingPreferences(BaseModel):
     """How the athlete splits training and how strength is scheduled."""
     # Fraction of weekly training time per sport — must roughly sum to 1.0.

@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
 
-from domain.athlete import AthleteProfile, Fitness
+from domain.athlete import AthleteProfile, Fitness, race_distances
 from domain.workout import (
     Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout, load_group
 )
@@ -19,27 +19,60 @@ class Phase(str, Enum):
     RACE = "Race"
 
 
-# Fixed phase windows counting back from race day (weeks-to-race thresholds).
-# Taper: last 2 weeks; Peak: the 2 before; Build: the 4 before; Base: everything earlier.
-PHASE_WEEKS = {
-    Phase.TAPER: 2,
-    Phase.PEAK: 2,
-    Phase.BUILD: 4,
-}
-_TAPER_END = PHASE_WEEKS[Phase.TAPER]                                   # 2
-_PEAK_END = _TAPER_END + PHASE_WEEKS[Phase.PEAK]                        # 4
-_BUILD_END = _PEAK_END + PHASE_WEEKS[Phase.BUILD]                       # 8
+# The engine is tuned around a 70.3 (middle-distance) race. Every other
+# distance is expressed as a ratio against these reference distances so
+# phase windows and long-session durations scale with the actual race.
+_REFERENCE_SWIM_M = 1900.0
+_REFERENCE_BIKE_M = 90000.0
+_REFERENCE_RUN_M = 21100.0
 
 
-def get_phase(race_date: date, today: date) -> Phase:
-    weeks_out = (race_date - today).days / 7
+def race_size_ratio(profile: AthleteProfile) -> float:
+    """
+    How big this race is relative to a 70.3, averaged across whichever
+    disciplines it actually includes (so duathlon/aquathlon/custom races
+    still get a sensible ratio). >1 = longer than 70.3, <1 = shorter.
+    """
+    swim_m, bike_m, run_m = race_distances(profile.goals)
+    ratios = []
+    if swim_m: ratios.append(swim_m / _REFERENCE_SWIM_M)
+    if bike_m: ratios.append(bike_m / _REFERENCE_BIKE_M)
+    if run_m: ratios.append(run_m / _REFERENCE_RUN_M)
+    return sum(ratios) / len(ratios) if ratios else 1.0
+
+
+# Phase-window weeks scale with race distance: short races need a short,
+# sharp build; very long races need a longer gradual build and taper.
+# (max_ratio, {taper, peak, build} weeks) — first matching bucket wins.
+_TIER_PHASE_WEEKS: list[tuple[float, dict[str, int]]] = [
+    (0.35, {"taper": 1, "peak": 1, "build": 2}),          # sprint / supersprint
+    (0.65, {"taper": 1, "peak": 2, "build": 3}),          # olympic
+    (1.30, {"taper": 2, "peak": 2, "build": 4}),          # 70.3 / T100 (tuned baseline)
+    (2.20, {"taper": 3, "peak": 3, "build": 6}),          # full IRONMAN
+    (float("inf"), {"taper": 4, "peak": 4, "build": 8}),  # double IRONMAN+
+]
+
+
+def _phase_weeks_for_ratio(ratio: float) -> dict[str, int]:
+    for max_ratio, weeks in _TIER_PHASE_WEEKS:
+        if ratio <= max_ratio:
+            return weeks
+    return _TIER_PHASE_WEEKS[-1][1]
+
+
+def get_phase(profile: AthleteProfile, today: date) -> Phase:
+    weeks_out = (profile.goals.race_date - today).days / 7
+    weeks = _phase_weeks_for_ratio(race_size_ratio(profile))
+    taper_end = weeks["taper"]
+    peak_end = taper_end + weeks["peak"]
+    build_end = peak_end + weeks["build"]
     if weeks_out <= 0:
         return Phase.RACE
-    if weeks_out <= _TAPER_END:
+    if weeks_out <= taper_end:
         return Phase.TAPER
-    if weeks_out <= _PEAK_END:
+    if weeks_out <= peak_end:
         return Phase.PEAK
-    if weeks_out <= _BUILD_END:
+    if weeks_out <= build_end:
         return Phase.BUILD
     return Phase.BASE
 
@@ -139,11 +172,13 @@ def _min(n: int) -> int:
 
 
 def build_swim_session(scheduled_date: date, phase: Phase, ftp: int, threshold_pace: float,
-                       css: float, max_hr: int | None = None, lthr: int | None = None) -> Workout:
+                       css: float, max_hr: int | None = None, lthr: int | None = None,
+                       size_ratio: float = 1.0) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(10),
                      target=Target(type=TargetType.PACE_ZONE, zone=1))
 
-    main_reps = 6 if phase in (Phase.BUILD, Phase.PEAK) else 4
+    base_reps = 6 if phase in (Phase.BUILD, Phase.PEAK) else 4
+    main_reps = max(2, round(base_reps * max(0.5, min(2.0, size_ratio))))
     main_block = RepeatBlock(repeat_count=main_reps, steps=[
         WorkoutStep(name="Interval", duration_seconds=_min(3),
                     target=Target(type=TargetType.PACE_ZONE, zone=4)),
@@ -166,14 +201,18 @@ def build_swim_session(scheduled_date: date, phase: Phase, ftp: int, threshold_p
 def build_bike_session(scheduled_date: date, phase: Phase, long: bool,
                        ftp: int, threshold_pace: float, css: float,
                        max_hr: int | None = None, lthr: int | None = None,
-                       sport: Sport = Sport.BIKE_OUTDOOR) -> Workout:
+                       sport: Sport = Sport.BIKE_OUTDOOR, size_ratio: float = 1.0) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(15),
                      target=Target(type=TargetType.POWER_ZONE, zone=2))
     cd = WorkoutStep(name="Cool-down", duration_seconds=_min(10),
                      target=Target(type=TargetType.POWER_ZONE, zone=1))
 
     if long:
-        main = WorkoutStep(name="Long Endurance", duration_seconds=_min(90 if phase == Phase.BASE else 110),
+        # Long-ride duration scales with race distance (sprint athletes don't
+        # need IM-length rides; IM athletes need more than a 70.3 long ride).
+        ratio = max(0.35, min(2.5, size_ratio))
+        base_min = 90 if phase == Phase.BASE else 110
+        main = WorkoutStep(name="Long Endurance", duration_seconds=_min(round(base_min * ratio)),
                            target=Target(type=TargetType.POWER_ZONE, zone=2))
         title = f"Long Ride ({phase.value})"
         steps = [wu, main, cd]
@@ -203,14 +242,20 @@ def build_bike_session(scheduled_date: date, phase: Phase, long: bool,
 
 def build_run_session(scheduled_date: date, phase: Phase, long: bool,
                       ftp: int, threshold_pace: float, css: float,
-                      max_hr: int | None = None, lthr: int | None = None) -> Workout:
+                      max_hr: int | None = None, lthr: int | None = None,
+                      size_ratio: float = 1.0) -> Workout:
     wu = WorkoutStep(name="Warm-up", duration_seconds=_min(10),
                      target=Target(type=TargetType.PACE_ZONE, zone=1))
     cd = WorkoutStep(name="Cool-down", duration_seconds=_min(8),
                      target=Target(type=TargetType.PACE_ZONE, zone=1))
 
     if long:
-        main = WorkoutStep(name="Long Run", duration_seconds=_min(70 if phase == Phase.BASE else 85),
+        # Long-run duration scales with race distance (see build_bike_session).
+        # Run legs get a gentler cap than bike — running is higher-impact, so
+        # even IM-distance long runs plateau rather than scaling linearly.
+        ratio = max(0.4, min(1.8, size_ratio))
+        base_min = 70 if phase == Phase.BASE else 85
+        main = WorkoutStep(name="Long Run", duration_seconds=_min(round(base_min * ratio)),
                            target=Target(type=TargetType.PACE_ZONE, zone=2))
         title = f"Long Run ({phase.value})"
         steps = [wu, main, cd]
@@ -240,14 +285,16 @@ def build_run_session(scheduled_date: date, phase: Phase, long: bool,
 
 def build_brick_session(scheduled_date: date, phase: Phase,
                         ftp: int, threshold_pace: float, css: float,
-                        max_hr: int | None = None, lthr: int | None = None) -> Workout:
-    """Bike→Run transition session."""
+                        max_hr: int | None = None, lthr: int | None = None,
+                        size_ratio: float = 1.0) -> Workout:
+    """Bike→Run transition session, sized to the race's bike/run distance."""
+    ratio = max(0.4, min(2.0, size_ratio))
     steps = [
         WorkoutStep(name="Bike Warm-up", duration_seconds=_min(10),
                     target=Target(type=TargetType.POWER_ZONE, zone=2)),
-        WorkoutStep(name="Bike Main", duration_seconds=_min(50),
+        WorkoutStep(name="Bike Main", duration_seconds=_min(round(50 * ratio)),
                     target=Target(type=TargetType.POWER_ZONE, zone=3)),
-        WorkoutStep(name="Transition + Run", duration_seconds=_min(20),
+        WorkoutStep(name="Transition + Run", duration_seconds=_min(round(20 * ratio)),
                     target=Target(type=TargetType.PACE_ZONE, zone=3)),
     ]
     return Workout(
@@ -340,7 +387,10 @@ _STRENGTH_DAYS = [0, 4, 2, 5, 1, 3, 6]  # Mon, Fri, Wed, Sat, Tue, Thu, Sun
 def generate_week(profile: AthleteProfile, week_start: date | None = None,
                   week_number: int = 1, fitness: Fitness | None = None) -> WeekPlan:
     """
-    Generate a fitness-aware structured training week for a 70.3 athlete.
+    Generate a fitness-aware structured training week, scaled to the athlete's
+    chosen race distance (see race_size_ratio — the engine is tuned around a
+    70.3 and every other distance scales phase windows + long-session length
+    relative to that baseline).
 
     The weekly TSS target is CTL-anchored and TSB-modulated (see
     weekly_tss_target), then distributed across sports per the athlete's
@@ -354,9 +404,10 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
         week_start = today - timedelta(days=today.weekday())  # roll back to Monday
 
     fit = fitness or profile.fitness
-    phase = get_phase(profile.goals.race_date, week_start)
+    phase = get_phase(profile, week_start)
     weeks_to_race = max(0.0, (profile.goals.race_date - week_start).days / 7)
     target_tss, rationale = weekly_tss_target(profile, phase, weeks_to_race, fitness=fit)
+    size_ratio = race_size_ratio(profile)
 
     ftp = profile.thresholds.ftp_watts
     tp = profile.thresholds.run_threshold_pace_sec_per_km
@@ -371,18 +422,25 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     workouts: list[Workout] = []
 
     # Swim, bike, run base sessions
-    workouts.append(build_swim_session(tue, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
+    workouts.append(build_swim_session(tue, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr,
+                                       size_ratio=size_ratio))
     workouts.append(build_bike_session(wed, phase, long=False, ftp=ftp, threshold_pace=tp,
                                        css=css, max_hr=max_hr, lthr=lthr, sport=Sport.BIKE_INDOOR))
     workouts.append(build_run_session(thu, phase, long=False, ftp=ftp, threshold_pace=tp,
                                       css=css, max_hr=max_hr, lthr=lthr))
-    if phase == Phase.PEAK:
-        workouts.append(build_brick_session(sat, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr))
+    # Brick sessions only make sense once the race includes a meaningful
+    # bike-to-run transition (skip for sprint/olympic, where race day itself
+    # is short enough that a dedicated brick isn't worth the training cost).
+    if phase == Phase.PEAK and size_ratio >= 0.65:
+        workouts.append(build_brick_session(sat, phase, ftp, tp, css, max_hr=max_hr, lthr=lthr,
+                                            size_ratio=size_ratio))
     else:
         workouts.append(build_bike_session(sat, phase, long=True, ftp=ftp, threshold_pace=tp,
-                                           css=css, max_hr=max_hr, lthr=lthr, sport=Sport.BIKE_OUTDOOR))
+                                           css=css, max_hr=max_hr, lthr=lthr, sport=Sport.BIKE_OUTDOOR,
+                                           size_ratio=size_ratio))
     workouts.append(build_run_session(sun, phase, long=(phase != Phase.TAPER),
-                                      ftp=ftp, threshold_pace=tp, css=css, max_hr=max_hr, lthr=lthr))
+                                      ftp=ftp, threshold_pace=tp, css=css, max_hr=max_hr, lthr=lthr,
+                                      size_ratio=size_ratio))
 
     # Scale each sport group to its share of the weekly target
     for group in ("swim", "bike", "run"):
