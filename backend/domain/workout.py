@@ -244,3 +244,71 @@ class Workout(BaseModel):
             "description": self.description,
             "steps": [item.detail() for item in self.steps],
         }
+
+
+# ── validation (per-sport intensity + end-condition rules) ────────────────────
+
+# Which intensity target types each sport may use.
+SPORT_ALLOWED_TARGETS: dict[Sport, set[TargetType]] = {
+    Sport.SWIM: {TargetType.PACE_ZONE, TargetType.OPEN},
+    Sport.RUN: {TargetType.PACE_ZONE, TargetType.HR_ZONE, TargetType.OPEN},
+    Sport.BIKE_OUTDOOR: {
+        TargetType.POWER_ZONE, TargetType.POWER_PERCENT_FTP, TargetType.HR_ZONE, TargetType.OPEN,
+    },
+    Sport.BIKE_INDOOR: {
+        TargetType.POWER_ZONE, TargetType.POWER_PERCENT_FTP, TargetType.HR_ZONE, TargetType.OPEN,
+    },
+    Sport.BRICK: {
+        TargetType.POWER_ZONE, TargetType.POWER_PERCENT_FTP, TargetType.PACE_ZONE,
+        TargetType.HR_ZONE, TargetType.OPEN,
+    },
+    Sport.STRENGTH: {TargetType.OPEN},
+}
+
+# Sports whose steps must be time-based only (no distance end condition).
+TIME_ONLY_SPORTS = {Sport.BIKE_INDOOR, Sport.BIKE_OUTDOOR, Sport.STRENGTH}
+
+_ZONE_MAX = {TargetType.POWER_ZONE: 6, TargetType.HR_ZONE: 5, TargetType.PACE_ZONE: 5}
+
+
+def validate_step(sport: Sport, step: WorkoutStep) -> None:
+    """Raise ValueError if a step's intensity/end-condition is invalid for the sport."""
+    t = step.target
+    allowed = SPORT_ALLOWED_TARGETS.get(sport, {TargetType.OPEN})
+    if t.type not in allowed:
+        nice = ", ".join(sorted(a.value for a in allowed))
+        raise ValueError(f"{sport.value} steps can't use intensity '{t.type.value}' (allowed: {nice}).")
+
+    if t.type in _ZONE_MAX:
+        hi = _ZONE_MAX[t.type]
+        if t.zone is None or not (1 <= t.zone <= hi):
+            raise ValueError(f"{t.type.value} zone must be between 1 and {hi} (got {t.zone}).")
+
+    if t.type == TargetType.POWER_PERCENT_FTP:
+        if t.pct_of_anchor is None or not (0.30 <= t.pct_of_anchor <= 2.00):
+            raise ValueError("power %FTP must be between 30% and 200%.")
+
+    if step.distance_meters is not None:
+        if sport in TIME_ONLY_SPORTS:
+            raise ValueError(f"{sport.value} steps must be time-based — distance targets aren't allowed.")
+        if step.distance_meters <= 0:
+            raise ValueError("step distance must be positive.")
+
+    if step.duration_seconds is None or step.duration_seconds <= 0:
+        raise ValueError("every step needs a positive duration.")
+
+
+def validate_workout(workout: Workout) -> None:
+    """Validate a full workout's structure and per-step targets. Raises ValueError."""
+    if not workout.steps:
+        raise ValueError("A workout needs at least one block.")
+    for item in workout.steps:
+        if isinstance(item, WorkoutStep):
+            validate_step(workout.sport, item)
+        else:  # RepeatBlock
+            if item.repeat_count < 1:
+                raise ValueError("interval repeat count must be at least 1.")
+            if not item.steps:
+                raise ValueError("an interval block needs at least one step.")
+            for sub in item.steps:
+                validate_step(workout.sport, sub)

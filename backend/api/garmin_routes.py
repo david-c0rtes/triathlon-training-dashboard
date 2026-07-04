@@ -11,7 +11,7 @@ from integrations.garmin.tss import measured_tss_per_hour, daily_tss_by_group
 from domain.fitness import compute_fitness, compute_fitness_series, activities_to_daily_tss
 from domain.profile_store import load_profile, save_profile, update_fitness
 from domain.workout import Sport
-from api.routes import sessions_for_date
+from api.routes import sessions_for_date, WorkoutIn
 
 router = APIRouter(prefix="/api/v1/garmin")
 
@@ -123,6 +123,42 @@ def garmin_push(day: date):
             raise HTTPException(status_code=502, detail=f"Garmin push error for '{w.title}': {e}")
 
     return {"date": day.isoformat(), "results": results}
+
+
+@router.post("/push-workout")
+def garmin_push_workout(workout: WorkoutIn):
+    """
+    Publish a single (possibly edited) workout to Garmin Connect and schedule it
+    on its own date. Used by the Workout review/edit screen's Publish button.
+    """
+    profile = load_profile()
+    w = workout.to_domain()
+    if w.sport == Sport.BIKE_INDOOR:
+        raise HTTPException(status_code=400, detail="Indoor cycling exports as .zwo — use POST /garmin/zwo-file.")
+    if w.sport == Sport.BRICK:
+        raise HTTPException(status_code=400, detail="Brick/multisport push not supported yet.")
+    if w.sport == Sport.STRENGTH:
+        raise HTTPException(status_code=400, detail="Strength sessions aren't pushed to Garmin as structured workouts.")
+    try:
+        return push_workout(w, profile.thresholds)
+    except EnvironmentError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Garmin push error: {e}")
+
+
+@router.post("/zwo-file")
+def garmin_zwo_file(workout: WorkoutIn):
+    """Return the .zwo for a single (possibly edited) indoor cycling workout."""
+    w = workout.to_domain()
+    if w.sport != Sport.BIKE_INDOOR:
+        raise HTTPException(status_code=400, detail="ZWO export is only for indoor cycling sessions.")
+    xml = workout_to_zwo(w)
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{zwo_filename(w)}"'},
+    )
 
 
 @router.get("/zwo/{day}")

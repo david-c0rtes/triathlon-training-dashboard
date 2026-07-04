@@ -1,11 +1,14 @@
 from datetime import date, timedelta
+from typing import Literal
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline, RACE_TYPES
 from domain.zones import compute_zones, AthleteZones, Zone
 from domain.periodization import generate_week, generate_plan, get_phase, WeekPlan
-from domain.workout import Workout
+from domain.workout import (
+    Workout, WorkoutStep, RepeatBlock, Target, TargetType, Sport, validate_workout,
+)
 from domain.profile_store import load_profile, save_profile
 
 router = APIRouter(prefix="/api/v1")
@@ -34,6 +37,87 @@ class ZonesResponse(BaseModel):
     run_hr: list[ZoneOut]
     run_pace: list[ZoneOut]
     swim_pace: list[ZoneOut]
+
+
+# ── editable-workout input (mirrors Workout.detail(); used by the editor) ──────
+
+class TargetIn(BaseModel):
+    type: TargetType
+    zone: int | None = None
+    pct_of_anchor: float | None = None
+
+
+class StepIn(BaseModel):
+    kind: Literal["step", "repeat"] = "step"
+    # step fields
+    name: str | None = None
+    duration_seconds: int | None = None
+    distance_meters: int | None = None
+    target: TargetIn | None = None
+    notes: str = ""
+    # repeat-block fields
+    repeat_count: int | None = None
+    steps: list["StepIn"] | None = None
+
+
+class WorkoutIn(BaseModel):
+    """An edited workout coming back from the review/edit screen."""
+    title: str
+    sport: Sport
+    date: date
+    description: str = ""
+    steps: list[StepIn]
+
+    def to_domain(self) -> Workout:
+        return Workout(
+            title=self.title,
+            sport=self.sport,
+            scheduled_date=self.date,
+            description=self.description,
+            steps=[_convert_step(s) for s in self.steps],
+        )
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WorkoutIn":
+        # Enforce per-sport intensity + end-condition rules at the API boundary,
+        # so preview/push/zwo all reject invalid workouts with a 422.
+        validate_workout(self.to_domain())
+        return self
+
+
+StepIn.model_rebuild()
+
+
+def _convert_executable(s: StepIn) -> WorkoutStep:
+    target = Target(**s.target.model_dump()) if s.target else Target(type=TargetType.OPEN)
+    return WorkoutStep(
+        name=s.name or "Step",
+        duration_seconds=int(s.duration_seconds or 0),
+        target=target,
+        notes=s.notes or "",
+        distance_meters=s.distance_meters,
+    )
+
+
+def _convert_step(s: StepIn):
+    if s.kind == "repeat":
+        return RepeatBlock(
+            repeat_count=int(s.repeat_count or 1),
+            steps=[_convert_executable(x) for x in (s.steps or [])],
+        )
+    return _convert_executable(s)
+
+
+def with_anchors(workout: Workout, profile: AthleteProfile) -> Workout:
+    """Attach the athlete's thresholds so TSS/duration can be computed."""
+    thr = profile.thresholds
+    return workout.with_anchors(
+        ftp=thr.ftp_watts,
+        threshold_pace=thr.run_threshold_pace_sec_per_km,
+        css=thr.swim_css_sec_per_100m,
+        max_hr=thr.max_hr,
+        lthr=thr.run_lthr,
+    )
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -99,6 +183,34 @@ def get_day_plan(day: date):
     profile = load_profile()
     sessions = sessions_for_date(profile, day)
     return {"date": day.isoformat(), "sessions": [w.detail() for w in sessions]}
+
+
+@router.get("/plan/next")
+def get_next_plan():
+    """
+    The next scheduled session(s): scans from today forward until it finds a day
+    with planned workouts, and returns every session on that day. Powers the
+    Workout review/edit screen.
+    """
+    profile = load_profile()
+    today = date.today()
+    for offset in range(0, 21):
+        d = today + timedelta(days=offset)
+        sessions = sessions_for_date(profile, d)
+        if sessions:
+            return {"date": d.isoformat(), "sessions": [w.detail() for w in sessions]}
+    return {"date": None, "sessions": []}
+
+
+@router.post("/plan/preview")
+def preview_workout(workout: WorkoutIn):
+    """
+    Recompute duration + planned TSS + normalized structure for an edited
+    workout, so the editor can show live totals without persisting anything.
+    """
+    profile = load_profile()
+    w = with_anchors(workout.to_domain(), profile)
+    return w.detail()
 
 
 @router.get("/plan/tomorrow")

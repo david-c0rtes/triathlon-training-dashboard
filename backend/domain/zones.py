@@ -69,46 +69,52 @@ def run_hr_zones(max_hr: int) -> list[Zone]:
     return _build_zones(boundaries, _HR_ZONE_NAMES)
 
 
+def _pace_zones(anchor_sec: float, names: list[str], mults: list[tuple[float, float]]) -> list[Zone]:
+    """
+    Build pace zones (sec per unit distance) from (slow_mult, fast_mult) pairs.
+    Higher sec = slower. Zone numbers run easy→hard: Z1 is the slowest
+    (recovery), Z5 the fastest — matching the workout model's zone numbering.
+    The open-ended side is the slow side (Z1 high = inf).
+    """
+    zones = []
+    for i, (slow_m, fast_m) in enumerate(mults):
+        low = anchor_sec * fast_m           # faster bound = smaller sec/km
+        high = float("inf") if slow_m == float("inf") else anchor_sec * slow_m
+        zones.append(Zone(number=i + 1, name=names[i], low=low, high=high))
+    return zones
+
+
+_PACE_ZONE_NAMES = ["Z1 Recovery", "Z2 Aerobic", "Z3 Tempo", "Z4 Threshold", "Z5 Speed"]
+
+
 def run_pace_zones(threshold_sec_per_km: float) -> list[Zone]:
     """
-    5-zone run pace model anchored on threshold pace.
-    Zones are expressed in sec/km — higher value = slower pace.
-    Boundary multipliers (pace ratios relative to threshold):
-      Z1 >135% / Z2 120-135% / Z3 107-120% / Z4 100-107% / Z5 <100%
-    NOTE: low < high means faster (lower sec/km), opposite to power zones.
+    5-zone run pace model anchored on threshold pace (sec/km).
+      Z1 >135% (recovery) / Z2 120-135% / Z3 107-120% / Z4 100-107% / Z5 <100% (speed)
     """
-    names = [
-        "Z1 Recovery",
-        "Z2 Aerobic",
-        "Z3 Tempo",
-        "Z4 Threshold",
-        "Z5 Speed",
+    mults = [
+        (float("inf"), 1.35),  # Z1: slower than 135% of threshold pace
+        (1.35, 1.20),          # Z2
+        (1.20, 1.07),          # Z3
+        (1.07, 1.00),          # Z4
+        (1.00, 0.90),          # Z5: faster than threshold
     ]
-    # Boundaries sorted slow→fast (descending sec/km) then reversed for Zone model convention
-    pcts = [float("inf"), 1.35, 1.20, 1.07, 1.00, 0.90]
-    boundaries = [threshold_sec_per_km * p if p != float("inf") else float("inf") for p in pcts]
-    # Flip so low=fast, high=slow (consistent with Zone.low < Zone.high meaning easier to interpret)
-    boundaries_asc = list(reversed(boundaries))
-    return _build_zones(boundaries_asc, names, unit_is_pace=True)
+    return _pace_zones(threshold_sec_per_km, _PACE_ZONE_NAMES, mults)
 
 
 def swim_css_zones(css_sec_per_100m: float) -> list[Zone]:
     """
-    5-zone swim model anchored on CSS (Critical Swim Speed).
-    Expressed in sec/100m — higher = slower.
-    Z1 >140% CSS / Z2 120-140% / Z3 108-120% / Z4 100-108% / Z5 <100%
+    5-zone swim model anchored on CSS (Critical Swim Speed), sec/100m.
+      Z1 >140% (recovery) / Z2 120-140% / Z3 108-120% / Z4 100-108% / Z5 <100% (speed)
     """
-    names = [
-        "Z1 Recovery",
-        "Z2 Aerobic",
-        "Z3 Tempo",
-        "Z4 Threshold",
-        "Z5 Speed",
+    mults = [
+        (float("inf"), 1.40),  # Z1
+        (1.40, 1.20),          # Z2
+        (1.20, 1.08),          # Z3
+        (1.08, 1.00),          # Z4
+        (1.00, 0.90),          # Z5
     ]
-    pcts = [float("inf"), 1.40, 1.20, 1.08, 1.00, 0.90]
-    boundaries = [css_sec_per_100m * p if p != float("inf") else float("inf") for p in pcts]
-    boundaries_asc = list(reversed(boundaries))
-    return _build_zones(boundaries_asc, names, unit_is_pace=True)
+    return _pace_zones(css_sec_per_100m, _PACE_ZONE_NAMES, mults)
 
 
 @dataclass

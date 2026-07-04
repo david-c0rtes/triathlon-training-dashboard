@@ -116,6 +116,19 @@ export interface DayPlan {
   sessions: WorkoutDetail[];
 }
 
+// Next scheduled session(s) — date is null when nothing is planned in range.
+export interface NextSession {
+  date: string | null;
+  sessions: WorkoutDetail[];
+}
+
+export interface PushResult {
+  workout_id?: number | string | null;
+  scheduled_date?: string;
+  title?: string;
+  [key: string]: unknown;
+}
+
 export interface GarminStatus {
   connected: boolean;
 }
