@@ -22,6 +22,7 @@ from garminconnect.workout import (
 
 from domain.workout import (
     Workout, WorkoutStep, RepeatBlock, Sport, TargetType, is_bike,
+    SwimEquipment, SwimStroke,
 )
 from domain.athlete import Thresholds
 from integrations.garmin.auth import get_client
@@ -59,6 +60,32 @@ _DISTANCE_END = {
     "displayable": True,
 }
 _KM_UNIT = {"unitKey": "kilometer"}
+_M_UNIT = {"unitKey": "meter"}
+# Garmin swim rest: a rest step whose end condition is a fixed timer (id 8).
+_FIXED_REST_END = {
+    "conditionTypeId": 8,
+    "conditionTypeKey": "fixed.rest",
+    "displayOrder": 8,
+    "displayable": True,
+}
+
+# Garmin stroke / equipment ids (workout service enums)
+_STROKE = {
+    SwimStroke.FREE: {"strokeTypeId": 6, "strokeTypeKey": "free"},
+    SwimStroke.BACK: {"strokeTypeId": 2, "strokeTypeKey": "backstroke"},
+    SwimStroke.BREAST: {"strokeTypeId": 3, "strokeTypeKey": "breaststroke"},
+    SwimStroke.DRILL: {"strokeTypeId": 4, "strokeTypeKey": "drill"},
+    SwimStroke.MIXED: {"strokeTypeId": 8, "strokeTypeKey": "mixed"},
+}
+_EQUIPMENT = {
+    SwimEquipment.FINS: {"equipmentTypeId": 1, "equipmentTypeKey": "swim_fins"},
+    SwimEquipment.KICKBOARD: {"equipmentTypeId": 2, "equipmentTypeKey": "swim_kickboard"},
+    SwimEquipment.PADDLES: {"equipmentTypeId": 3, "equipmentTypeKey": "swim_paddles"},
+    SwimEquipment.PADDLES_BUOY: {"equipmentTypeId": 3, "equipmentTypeKey": "swim_paddles"},
+    SwimEquipment.PADDLES_FINS: {"equipmentTypeId": 3, "equipmentTypeKey": "swim_paddles"},
+    SwimEquipment.PULL_BUOY: {"equipmentTypeId": 4, "equipmentTypeKey": "swim_pull_buoy"},
+    SwimEquipment.SNORKEL: {"equipmentTypeId": 5, "equipmentTypeKey": "swim_snorkel"},
+}
 _NO_TARGET = {
     "workoutTargetTypeId": GTarget.NO_TARGET,
     "workoutTargetTypeKey": "no.target",
@@ -164,18 +191,46 @@ def _executable(sport: Sport, step: WorkoutStep, thr: Thresholds, order: int) ->
     extra: dict = {}
     if step.distance_meters:
         end_condition, end_value = dict(_DISTANCE_END), float(step.distance_meters)
-        extra["preferredEndConditionUnit"] = dict(_KM_UNIT)
+        extra["preferredEndConditionUnit"] = dict(_M_UNIT if sport == Sport.SWIM else _KM_UNIT)
     else:
         end_condition, end_value = dict(_TIME_END), float(step.duration_seconds)
+    if sport == Sport.SWIM:
+        if step.stroke and step.stroke in _STROKE:
+            extra["strokeType"] = dict(_STROKE[step.stroke])
+        if step.equipment and step.equipment in _EQUIPMENT:
+            extra["equipmentType"] = dict(_EQUIPMENT[step.equipment])
+    description = step.name if not step.notes else f"{step.name} — {step.notes}"
     return ExecutableStep(
         stepOrder=order,
         stepType={"stepTypeId": type_id, "stepTypeKey": type_key, "displayOrder": display},
         endCondition=end_condition,
         endConditionValue=end_value,
-        description=step.name,
+        description=description,
         **_target_fields(sport, step, thr),
         **extra,
     )
+
+
+def _rest_step(seconds: int, order: int) -> ExecutableStep:
+    """A fixed-rest step (used after swim sets: '3×100 Z3, 10s rest')."""
+    return ExecutableStep(
+        stepOrder=order,
+        stepType={"stepTypeId": StepType.REST, "stepTypeKey": "rest", "displayOrder": 5},
+        endCondition=dict(_FIXED_REST_END),
+        endConditionValue=float(seconds),
+        description="Rest",
+        targetType=dict(_NO_TARGET),
+    )
+
+
+def _steps_with_rest(sport: Sport, step: WorkoutStep, thr: Thresholds, order: int) -> tuple[list, int]:
+    """Emit the work step plus its trailing fixed-rest step (if any)."""
+    out = [_executable(sport, step, thr, order)]
+    order += 1
+    if step.rest_seconds > 0:
+        out.append(_rest_step(step.rest_seconds, order))
+        order += 1
+    return out, order
 
 
 def build_segment_steps(workout: Workout, thr: Thresholds) -> list:
@@ -184,13 +239,13 @@ def build_segment_steps(workout: Workout, thr: Thresholds) -> list:
     order = 1
     for item in workout.steps:
         if isinstance(item, WorkoutStep):
-            out.append(_executable(workout.sport, item, thr, order))
-            order += 1
+            steps, order = _steps_with_rest(workout.sport, item, thr, order)
+            out.extend(steps)
         else:  # RepeatBlock
             inner = []
             for sub in item.steps:
-                inner.append(_executable(workout.sport, sub, thr, order))
-                order += 1
+                steps, order = _steps_with_rest(workout.sport, sub, thr, order)
+                inner.extend(steps)
             from garminconnect.workout import create_repeat_group
             out.append(create_repeat_group(item.repeat_count, inner, order))
             order += 1

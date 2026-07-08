@@ -53,6 +53,9 @@ class StepIn(BaseModel):
     name: str | None = None
     duration_seconds: int | None = None
     distance_meters: int | None = None
+    rest_seconds: int = 0
+    equipment: str | None = None   # swim only (SwimEquipment values)
+    stroke: str | None = None      # swim only (SwimStroke values)
     target: TargetIn | None = None
     notes: str = ""
     # repeat-block fields
@@ -96,6 +99,9 @@ def _convert_executable(s: StepIn) -> WorkoutStep:
         target=target,
         notes=s.notes or "",
         distance_meters=s.distance_meters,
+        rest_seconds=int(s.rest_seconds or 0),
+        equipment=s.equipment,
+        stroke=s.stroke,
     )
 
 
@@ -109,7 +115,8 @@ def _convert_step(s: StepIn):
 
 
 def with_anchors(workout: Workout, profile: AthleteProfile) -> Workout:
-    """Attach the athlete's thresholds so TSS/duration can be computed."""
+    """Attach the athlete's thresholds so TSS/duration can be computed,
+    and re-derive swim step durations from their distances."""
     thr = profile.thresholds
     return workout.with_anchors(
         ftp=thr.ftp_watts,
@@ -117,7 +124,7 @@ def with_anchors(workout: Workout, profile: AthleteProfile) -> Workout:
         css=thr.swim_css_sec_per_100m,
         max_hr=thr.max_hr,
         lthr=thr.run_lthr,
-    )
+    ).normalize(thr.swim_css_sec_per_100m)
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -175,6 +182,32 @@ def sessions_for_date(profile: AthleteProfile, d: date) -> list[Workout]:
     week_start = d - timedelta(days=d.weekday())
     plan = generate_week(profile, week_start=week_start)
     return [w for w in plan.workouts if w.scheduled_date == d]
+
+
+def workouts_in_range(profile: AthleteProfile, start: date, end: date) -> list[Workout]:
+    """All planned workouts scheduled within [start, end], generated week-by-week."""
+    if end < start:
+        start, end = end, start
+    if (end - start).days > 180:
+        end = start + timedelta(days=180)  # cap to keep generation bounded
+    out: list[Workout] = []
+    wk = start - timedelta(days=start.weekday())  # Monday of the first week
+    while wk <= end:
+        for w in generate_week(profile, week_start=wk).workouts:
+            if start <= w.scheduled_date <= end:
+                out.append(w)
+        wk += timedelta(days=7)
+    return out
+
+
+@router.get("/plan/range")
+def get_plan_range(start: date, end: date):
+    """Day-by-day workout summaries across a date range — powers the calendar grid."""
+    profile = load_profile()
+    days: dict[str, list[dict]] = {}
+    for w in workouts_in_range(profile, start, end):
+        days.setdefault(w.scheduled_date.isoformat(), []).append(w.summary())
+    return {"days": [{"date": d, "sessions": s} for d, s in sorted(days.items())]}
 
 
 @router.get("/plan/day")

@@ -43,6 +43,56 @@ class TargetType(str, Enum):
     OPEN = "open"                   # no target (warm-up, cool-down feel)
 
 
+class SwimEquipment(str, Enum):
+    """Swim toys — exported to Garmin as the step's equipmentType."""
+    PULL_BUOY = "pull_buoy"
+    KICKBOARD = "kickboard"
+    FINS = "fins"
+    PADDLES = "paddles"
+    PADDLES_BUOY = "paddles_buoy"   # paddles + pull buoy (Garmin: paddles)
+    PADDLES_FINS = "paddles_fins"   # paddles + fins (Garmin: paddles)
+    SNORKEL = "snorkel"
+
+
+class SwimStroke(str, Enum):
+    """Stroke for a swim step — free unless it's a drill/recovery variation."""
+    FREE = "free"
+    BACK = "back"
+    BREAST = "breast"
+    DRILL = "drill"     # one-arm, catch-up, sculling… described in notes
+    MIXED = "mixed"
+
+
+# Swim pace multipliers vs CSS per zone — mirrors the TSS pace ratios and is
+# used to estimate a swim step's duration from its distance.
+SWIM_ZONE_PACE_RATIO = {1: 1.35, 2: 1.22, 3: 1.12, 4: 1.04, 5: 0.95}
+# Equipment that meaningfully changes speed vs clean freestyle at the same effort.
+_EQUIPMENT_PACE_FACTOR = {
+    SwimEquipment.KICKBOARD: 1.65,      # kick sets are much slower
+    SwimEquipment.FINS: 0.85,
+    SwimEquipment.PADDLES_FINS: 0.82,
+    SwimEquipment.PULL_BUOY: 1.0,
+    SwimEquipment.PADDLES: 0.95,
+    SwimEquipment.PADDLES_BUOY: 0.95,
+    SwimEquipment.SNORKEL: 1.05,
+}
+_STROKE_PACE_FACTOR = {
+    SwimStroke.BREAST: 1.35,
+    SwimStroke.BACK: 1.20,
+    SwimStroke.DRILL: 1.45,
+    SwimStroke.MIXED: 1.15,
+}
+
+
+def estimate_swim_seconds(distance_m: int, zone: int | None, css_sec_per_100m: float,
+                          equipment: "SwimEquipment | None" = None,
+                          stroke: "SwimStroke | None" = None) -> int:
+    """Estimated swim time for a step: distance × CSS × zone ratio × gear/stroke factor."""
+    ratio = SWIM_ZONE_PACE_RATIO.get(zone or 2, 1.22)
+    factor = _EQUIPMENT_PACE_FACTOR.get(equipment, 1.0) * _STROKE_PACE_FACTOR.get(stroke, 1.0)
+    return max(10, round(distance_m / 100.0 * css_sec_per_100m * ratio * factor))
+
+
 class Target(BaseModel):
     type: TargetType
     zone: int | None = None          # zone number when type is *_ZONE
@@ -55,6 +105,14 @@ class WorkoutStep(BaseModel):
     target: Target
     notes: str = ""
     distance_meters: int | None = None  # if set, the step ends by distance, not time
+    rest_seconds: int = 0               # fixed rest AFTER the step (swim sets)
+    equipment: SwimEquipment | None = None  # swim only
+    stroke: SwimStroke | None = None        # swim only
+
+    @property
+    def elapsed_seconds(self) -> int:
+        """Work + rest — what the step actually costs on the clock."""
+        return self.duration_seconds + max(0, self.rest_seconds)
 
     def detail(self) -> dict:
         return {
@@ -62,6 +120,9 @@ class WorkoutStep(BaseModel):
             "name": self.name,
             "duration_seconds": self.duration_seconds,
             "distance_meters": self.distance_meters,
+            "rest_seconds": self.rest_seconds,
+            "equipment": self.equipment.value if self.equipment else None,
+            "stroke": self.stroke.value if self.stroke else None,
             "target": self.target.model_dump(),
             "notes": self.notes,
         }
@@ -73,7 +134,7 @@ class RepeatBlock(BaseModel):
 
     @property
     def total_duration_seconds(self) -> int:
-        return self.repeat_count * sum(s.duration_seconds for s in self.steps)
+        return self.repeat_count * sum(s.elapsed_seconds for s in self.steps)
 
     def detail(self) -> dict:
         return {
@@ -206,10 +267,28 @@ class Workout(BaseModel):
         total = 0
         for item in self.steps:
             if isinstance(item, WorkoutStep):
-                total += item.duration_seconds
+                total += item.elapsed_seconds
             else:
                 total += item.total_duration_seconds
         return total
+
+    def normalize(self, css_sec_per_100m: float) -> "Workout":
+        """
+        Re-derive swim step durations from their distances (swim is always
+        distance-first; duration is an estimate used for TSS/total time).
+        No-op for other sports.
+        """
+        if self.sport != Sport.SWIM or css_sec_per_100m <= 0:
+            return self
+        for item in self.steps:
+            steps = [item] if isinstance(item, WorkoutStep) else item.steps
+            for s in steps:
+                if s.distance_meters:
+                    s.duration_seconds = estimate_swim_seconds(
+                        s.distance_meters, s.target.zone, css_sec_per_100m,
+                        equipment=s.equipment, stroke=s.stroke,
+                    )
+        return self
 
     @property
     def total_duration_minutes(self) -> int:
@@ -294,7 +373,19 @@ def validate_step(sport: Sport, step: WorkoutStep) -> None:
         if step.distance_meters <= 0:
             raise ValueError("step distance must be positive.")
 
-    if step.duration_seconds is None or step.duration_seconds <= 0:
+    # Swimming is always distance-based (pool workouts count metres, not minutes).
+    if sport == Sport.SWIM and not step.distance_meters:
+        raise ValueError("swim steps must have a distance in metres.")
+
+    if step.rest_seconds < 0 or step.rest_seconds > 600:
+        raise ValueError("step rest must be between 0 and 600 seconds.")
+
+    if (step.equipment or step.stroke) and sport != Sport.SWIM:
+        raise ValueError("equipment/stroke options only apply to swim steps.")
+
+    # Swim durations are derived from distance (Workout.normalize), so a
+    # zero duration is fine there; everything else needs explicit time.
+    if sport != Sport.SWIM and (step.duration_seconds is None or step.duration_seconds <= 0):
         raise ValueError("every step needs a positive duration.")
 
 
