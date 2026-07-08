@@ -100,6 +100,9 @@ export interface WorkoutStepDetail {
   name?: string;
   duration_seconds?: number;
   distance_meters?: number | null;
+  rest_seconds?: number;          // fixed rest after the step (swim sets)
+  equipment?: string | null;      // swim: pull_buoy/kickboard/fins/paddles/…
+  stroke?: string | null;         // swim: free/back/breast/drill/mixed
   target?: { type: string; zone: number | null; pct_of_anchor: number | null };
   notes?: string;
   repeat_count?: number;
@@ -131,6 +134,27 @@ export interface PushResult {
 
 export interface GarminStatus {
   connected: boolean;
+}
+
+export interface PlanRangeDay {
+  date: string;
+  sessions: WorkoutSummary[];
+}
+
+export interface PlanRange {
+  days: PlanRangeDay[];
+}
+
+export interface GoogleStatus {
+  configured: boolean;
+  connected: boolean;
+}
+
+export interface GooglePushResult {
+  pushed: number;
+  deleted: number;
+  calendar?: string;
+  timezone?: string;
 }
 
 export interface PmcPoint {

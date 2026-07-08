@@ -2,6 +2,7 @@ import type {
   AthleteProfile, FullPlan, WeekPlan, DayPlan, GarminStatus,
   FitnessHistory, Insight, ZonesResponse, RaceTypeOption,
   NextSession, WorkoutDetail, PushResult,
+  PlanRange, GoogleStatus, GooglePushResult,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
@@ -15,7 +16,11 @@ async function get<T>(path: string): Promise<T> {
 
 async function post<T>(path: string): Promise<T> {
   const res = await fetch(`${PREFIX}${path}`, { method: "POST" });
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    try { msg = extractDetail(await res.json(), msg); } catch { /* keep status */ }
+    throw new Error(msg);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -68,8 +73,15 @@ export const api = {
   day: (day: string) => get<DayPlan>(`/plan/day?day=${day}`),
   tomorrow: () => get<DayPlan>("/plan/tomorrow"),
   nextSession: () => get<NextSession>("/plan/next"),
+  planRange: (start: string, end: string) => get<PlanRange>(`/plan/range?start=${start}&end=${end}`),
   previewWorkout: (w: WorkoutDetail) => postJson<WorkoutDetail>("/plan/preview", w),
   pushWorkout: (w: WorkoutDetail) => postJson<PushResult>("/garmin/push-workout", w),
+
+  googleStatus: () => get<GoogleStatus>("/google/status"),
+  googleConnect: () => post<GoogleStatus>("/google/connect"),
+  googleDisconnect: () => post<GoogleStatus>("/google/disconnect"),
+  googlePush: (start: string, end: string) =>
+    post<GooglePushResult>(`/google/push?start=${start}&end=${end}`),
   garminStatus: () => get<GarminStatus>("/garmin/status"),
   garminSync: (days = 90) => post<unknown>(`/garmin/sync?days=${days}`),
   history: (days = 90) => get<FitnessHistory>(`/garmin/history?days=${days}`),

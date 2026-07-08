@@ -4,7 +4,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Performance } from "./pages/Performance";
 import { Settings } from "./pages/Settings";
 import { Workout } from "./pages/Workout";
-import { Placeholder } from "./pages/Placeholder";
+import { Calendar } from "./pages/Calendar";
 
 export default function App() {
   return (
@@ -13,7 +13,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="workout" element={<Workout />} />
-          <Route path="calendar" element={<Placeholder title="Calendar" />} />
+          <Route path="calendar" element={<Calendar />} />
           <Route path="performance" element={<Performance />} />
           <Route path="settings" element={<Settings />} />
         </Route>

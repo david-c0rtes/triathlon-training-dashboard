@@ -22,5 +22,8 @@ token.json
 garmin_credentials.env
 google_credentials.env
 backend/.tokens/
+backend/.secrets/
 backend/data/
+google_client_secret.json
+google_token.json
 github-claude access.txt

@@ -35,14 +35,29 @@ function targetFor(sport: Sport, zone: number): WorkoutStepDetail["target"] {
 }
 
 function makeStep(name: string, seconds: number, sport: Sport, zone: number): WorkoutStepDetail {
+  if (sport === "swim") {
+    // swim is always distance-based; duration is derived server-side
+    const dist = zone >= 4 ? 100 : zone >= 3 ? 100 : 200;
+    const rest = zone >= 4 ? 20 : 15;
+    return {
+      kind: "step", name, duration_seconds: 0, distance_meters: dist,
+      rest_seconds: rest, equipment: null, stroke: null,
+      notes: "", target: targetFor(sport, zone),
+    };
+  }
   return {
     kind: "step", name, duration_seconds: seconds, distance_meters: null,
+    rest_seconds: 0, equipment: null, stroke: null,
     notes: "", target: targetFor(sport, zone),
   };
 }
 
 function makeFreshBlock(type: BlockKind, sport: Sport): WorkoutStepDetail {
-  if (type === "steady") return makeStep("Active", 1200, sport, 2);
+  if (type === "steady") {
+    const s = makeStep("Active", 1200, sport, 2);
+    if (sport === "swim") { s.distance_meters = 400; s.rest_seconds = 0; }
+    return s;
+  }
   if (type === "interval2")
     return {
       kind: "repeat", repeat_count: 4,
@@ -56,7 +71,9 @@ function makeFreshBlock(type: BlockKind, sport: Sport): WorkoutStepDetail {
 
 function blockKindOf(block: WorkoutStepDetail): BlockKind {
   if (block.kind !== "repeat") return "steady";
-  return (block.steps?.length ?? 2) >= 3 ? "interval3" : "interval2";
+  const n = block.steps?.length ?? 2;
+  if (n <= 1) return "steady";  // a repeated single set (e.g. 3×100m) is still "steady"
+  return n >= 3 ? "interval3" : "interval2";
 }
 
 /** Convert a block to another type, preserving existing steps where possible. */
@@ -257,7 +274,20 @@ export function Workout() {
     const timeOnly = BIKE_SPORTS.has(sport) || sport === "strength";
     const fix = (s: WorkoutStepDetail) => {
       if (timeOnly) s.distance_meters = null;
-      if (groupChanged) s.target = normalizeTarget(s.target, sport);
+      if (sport === "swim") {
+        // swim steps are always distance-based
+        s.distance_meters = s.distance_meters ?? 100;
+      } else {
+        // equipment/stroke are swim-only (backend rejects them elsewhere)
+        s.equipment = null;
+        s.stroke = null;
+      }
+      if (groupChanged) {
+        s.target = normalizeTarget(s.target, sport);
+        if (sport !== "swim") s.rest_seconds = 0;
+        if (!timeOnly && sport !== "swim" && !s.duration_seconds) s.duration_seconds = 600;
+        if (timeOnly && !s.duration_seconds) s.duration_seconds = 600;
+      }
     };
     for (const item of w.steps) {
       if (item.kind === "repeat") (item.steps ?? []).forEach(fix);
@@ -269,6 +299,24 @@ export function Workout() {
   function setBlockType(wIdx: number, topIdx: number, type: BlockKind) {
     const w = structuredClone(workoutsRef.current[wIdx]);
     w.steps[topIdx] = convertBlock(w.steps[topIdx], type, w.sport);
+    commit(wIdx, w);
+  }
+
+  function setBlockRepeat(wIdx: number, topIdx: number, n: number) {
+    const w = structuredClone(workoutsRef.current[wIdx]);
+    const b = w.steps[topIdx];
+    const count = Math.max(1, Math.min(30, n));
+    if (b.kind === "repeat") {
+      if (count <= 1 && (b.steps?.length ?? 0) === 1) {
+        // 1×(single set) collapses back to a plain steady step
+        w.steps[topIdx] = { ...b.steps![0], kind: "step" };
+      } else {
+        b.repeat_count = count;
+      }
+    } else if (count > 1) {
+      // repeating a steady block wraps it as a single-set repeat (e.g. 3×100m)
+      w.steps[topIdx] = { kind: "repeat", repeat_count: count, steps: [{ ...b, kind: "step" }] };
+    }
     commit(wIdx, w);
   }
 
@@ -367,6 +415,7 @@ export function Workout() {
               onDate={(date) => patchWorkout(i, { date })}
               onStep={(topIdx, innerIdx, patch) => patchStep(i, topIdx, innerIdx, patch)}
               onBlockType={(topIdx, type) => setBlockType(i, topIdx, type)}
+              onBlockRepeat={(topIdx, n) => setBlockRepeat(i, topIdx, n)}
               onBlockDelete={(topIdx) => deleteBlock(i, topIdx)}
               onBlockMove={(topIdx, dir) => moveBlock(i, topIdx, dir)}
               onInnerMove={(topIdx, innerIdx, dir) => moveInnerStep(i, topIdx, innerIdx, dir)}
@@ -388,8 +437,8 @@ export function Workout() {
 // ── workout card ────────────────────────────────────────────────────────────
 
 function WorkoutEditor({
-  w, zones, metric, action, onTitle, onSport, onDate, onStep, onBlockType, onBlockDelete,
-  onBlockMove, onInnerMove, onAddBlock, onPublish,
+  w, zones, metric, action, onTitle, onSport, onDate, onStep, onBlockType, onBlockRepeat,
+  onBlockDelete, onBlockMove, onInnerMove, onAddBlock, onPublish,
 }: {
   w: WorkoutDetail;
   zones: ZonesResponse | null;
@@ -400,6 +449,7 @@ function WorkoutEditor({
   onDate: (date: string) => void;
   onStep: (topIdx: number, innerIdx: number | null, patch: Partial<WorkoutStepDetail>) => void;
   onBlockType: (topIdx: number, type: BlockKind) => void;
+  onBlockRepeat: (topIdx: number, n: number) => void;
   onBlockDelete: (topIdx: number) => void;
   onBlockMove: (topIdx: number, dir: -1 | 1) => void;
   onInnerMove: (topIdx: number, innerIdx: number, dir: -1 | 1) => void;
@@ -500,6 +550,7 @@ function WorkoutEditor({
             zones={zones}
             onStep={onStep}
             onType={onBlockType}
+            onRepeat={onBlockRepeat}
             onDelete={onBlockDelete}
             onMove={onBlockMove}
             onInnerMove={onInnerMove}
@@ -548,7 +599,7 @@ function WorkoutEditor({
 // ── block editor (type selector + repeat count + steps) ───────────────────────
 
 function BlockEditor({
-  block, topIdx, total, sport, zones, onStep, onType, onDelete, onMove, onInnerMove,
+  block, topIdx, total, sport, zones, onStep, onType, onRepeat, onDelete, onMove, onInnerMove,
 }: {
   block: WorkoutStepDetail;
   topIdx: number;
@@ -557,6 +608,7 @@ function BlockEditor({
   zones: ZonesResponse | null;
   onStep: (topIdx: number, innerIdx: number | null, patch: Partial<WorkoutStepDetail>) => void;
   onType: (topIdx: number, type: BlockKind) => void;
+  onRepeat: (topIdx: number, n: number) => void;
   onDelete: (topIdx: number) => void;
   onMove: (topIdx: number, dir: -1 | 1) => void;
   onInnerMove: (topIdx: number, innerIdx: number, dir: -1 | 1) => void;
@@ -564,6 +616,7 @@ function BlockEditor({
   const kind = blockKindOf(block);
   const isRepeat = block.kind === "repeat";
   const innerSteps = block.steps ?? [];
+  const repeatCount = isRepeat ? (block.repeat_count ?? 1) : 1;
   return (
     <div className="rounded-btn border border-outline-variant/40 bg-surface-container-low/60 p-2 flex flex-col gap-2">
       {/* toolbar */}
@@ -577,19 +630,18 @@ function BlockEditor({
           <option value="interval2">2-step interval</option>
           <option value="interval3">3-step interval</option>
         </select>
-        {isRepeat && (
-          <div className="flex items-center gap-1">
-            <span className="font-mono text-xs text-on-surface-variant">repeat ×</span>
-            <input
-              type="number"
-              min={1}
-              max={30}
-              value={block.repeat_count ?? 1}
-              onChange={(e) => onStep(topIdx, null, { repeat_count: Math.max(1, parseInt(e.target.value || "1", 10)) })}
-              className={`${inputBase} w-14 text-center`}
-            />
-          </div>
-        )}
+        {/* every block can repeat — a steady set ×3 becomes 3×(set + rest) */}
+        <div className="flex items-center gap-1">
+          <span className="font-mono text-xs text-on-surface-variant">repeat ×</span>
+          <input
+            type="number"
+            min={1}
+            max={30}
+            value={repeatCount}
+            onChange={(e) => onRepeat(topIdx, parseInt(e.target.value || "1", 10))}
+            className={`${inputBase} w-14 text-center`}
+          />
+        </div>
         <div className="ml-auto flex items-center gap-1">
           <MoveButtons
             up={topIdx > 0}
@@ -722,6 +774,7 @@ function StepEditor({
   move?: { up: boolean; down: boolean; onUp: () => void; onDown: () => void };
 }) {
   const zone = stepZone(step);
+  const isSwim = sport === "swim";
   const timeOnly = BIKE_SPORTS.has(sport) || sport === "strength";
   const isDistance = step.distance_meters != null;
   const metric = (step.target?.type ?? "open") as IntensityMetric;
@@ -749,45 +802,77 @@ function StepEditor({
         onChange={(e) => onChange({ name: e.target.value })}
       />
 
-      {/* end condition: time-only sports show just a duration; others get a Time/Dist toggle */}
-      {!timeOnly && (
-        <div className="flex rounded-btn border border-outline-variant/50 overflow-hidden">
-          {([["time", "Time"], ["dist", "Dist"]] as const).map(([k, lbl]) => {
-            const active = k === "dist" ? isDistance : !isDistance;
-            return (
-              <button
-                key={k}
-                onClick={() =>
-                  onChange({ distance_meters: k === "dist" ? (sport === "swim" ? 100 : 1000) : null })
-                }
-                className={`px-2 py-1 font-mono text-[11px] transition-colors ${
-                  active ? "bg-primary text-on-primary" : "text-on-surface-variant hover:bg-surface-container-high"
-                }`}
-              >
-                {lbl}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {isDistance && !timeOnly ? (
+      {/* end condition — swim: always distance + rest; bike/strength: time only;
+          run: Time/Dist toggle */}
+      {isSwim ? (
         <>
           <label className="flex items-center gap-1">
             <input
               type="number"
-              min={0}
-              step={sport === "swim" ? 25 : 100}
-              value={step.distance_meters ?? 0}
-              onChange={(e) => onChange({ distance_meters: parseInt(e.target.value || "0", 10) })}
+              min={1}
+              step={1}
+              value={step.distance_meters ?? 100}
+              onChange={(e) => onChange({ distance_meters: Math.max(1, parseInt(e.target.value || "1", 10)) })}
               className={`${inputBase} w-20 text-right`}
             />
             <span className="font-mono text-xs text-on-surface-variant">m</span>
           </label>
-          <label className="flex items-center gap-1" title="Estimated time — drives the training-load (TSS) calc">
-            <MonoLabel>~</MonoLabel>
-            <DurationInput seconds={step.duration_seconds ?? 0} onChange={(s) => onChange({ duration_seconds: s })} />
+          <label className="flex items-center gap-1" title="Fixed rest after this set">
+            <MonoLabel>rest</MonoLabel>
+            <input
+              type="number"
+              min={0}
+              max={600}
+              step={5}
+              value={step.rest_seconds ?? 0}
+              onChange={(e) => onChange({ rest_seconds: Math.max(0, parseInt(e.target.value || "0", 10)) })}
+              className={`${inputBase} w-16 text-right`}
+            />
+            <span className="font-mono text-xs text-on-surface-variant">s</span>
           </label>
+        </>
+      ) : !timeOnly ? (
+        <>
+          <div className="flex rounded-btn border border-outline-variant/50 overflow-hidden">
+            {([["time", "Time"], ["dist", "Dist"]] as const).map(([k, lbl]) => {
+              const active = k === "dist" ? isDistance : !isDistance;
+              return (
+                <button
+                  key={k}
+                  onClick={() => onChange({ distance_meters: k === "dist" ? 1000 : null })}
+                  className={`px-2 py-1 font-mono text-[11px] transition-colors ${
+                    active ? "bg-primary text-on-primary" : "text-on-surface-variant hover:bg-surface-container-high"
+                  }`}
+                >
+                  {lbl}
+                </button>
+              );
+            })}
+          </div>
+          {isDistance ? (
+            <>
+              <label className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min={0}
+                  step={100}
+                  value={step.distance_meters ?? 0}
+                  onChange={(e) => onChange({ distance_meters: parseInt(e.target.value || "0", 10) })}
+                  className={`${inputBase} w-20 text-right`}
+                />
+                <span className="font-mono text-xs text-on-surface-variant">m</span>
+              </label>
+              <label className="flex items-center gap-1" title="Estimated time — drives the training-load (TSS) calc">
+                <MonoLabel>~</MonoLabel>
+                <DurationInput seconds={step.duration_seconds ?? 0} onChange={(s) => onChange({ duration_seconds: s })} />
+              </label>
+            </>
+          ) : (
+            <label className="flex items-center gap-1">
+              <MonoLabel>time</MonoLabel>
+              <DurationInput seconds={step.duration_seconds ?? 0} onChange={(s) => onChange({ duration_seconds: s })} />
+            </label>
+          )}
         </>
       ) : (
         <label className="flex items-center gap-1">
@@ -809,6 +894,39 @@ function StepEditor({
         <span className="font-mono text-xs text-outline">free</span>
       )}
       <TargetEditor step={step} sport={sport} zones={zones} onChange={onChange} />
+
+      {/* swim extras: equipment + stroke */}
+      {isSwim && (
+        <>
+          <select
+            value={step.equipment ?? ""}
+            onChange={(e) => onChange({ equipment: e.target.value || null })}
+            className={`${inputBase} text-xs`}
+            title="Equipment"
+          >
+            <option value="">no gear</option>
+            <option value="pull_buoy">pull buoy</option>
+            <option value="kickboard">kickboard</option>
+            <option value="fins">fins</option>
+            <option value="paddles">paddles</option>
+            <option value="paddles_buoy">paddles + buoy</option>
+            <option value="paddles_fins">paddles + fins</option>
+            <option value="snorkel">snorkel</option>
+          </select>
+          <select
+            value={step.stroke ?? ""}
+            onChange={(e) => onChange({ stroke: e.target.value || null })}
+            className={`${inputBase} text-xs`}
+            title="Stroke"
+          >
+            <option value="">free</option>
+            <option value="back">back</option>
+            <option value="breast">breast</option>
+            <option value="drill">drill</option>
+            <option value="mixed">mixed</option>
+          </select>
+        </>
+      )}
     </div>
   );
 }
