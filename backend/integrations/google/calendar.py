@@ -84,6 +84,14 @@ def _load_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
+def _account_timezone(service) -> str:
+    """The user's actual Google account timezone (e.g. 'Europe/Madrid')."""
+    try:
+        return service.settings().get(setting="timezone").execute().get("value", "UTC")
+    except Exception:
+        return "UTC"
+
+
 def _training_calendar_id(service) -> str:
     """Find (or create) the dedicated 'TriFlow Training' calendar; cache its id."""
     if _CAL_ID_FILE.exists():
@@ -100,9 +108,13 @@ def _training_calendar_id(service) -> str:
         if not page:
             break
 
-    created = service.calendars().insert(
-        body={"summary": _CALENDAR_NAME, "description": "Workouts planned in TriFlow."}
-    ).execute()
+    # New calendars default to UTC unless a timeZone is given — use the
+    # account's own timezone so events land at the intended local time.
+    created = service.calendars().insert(body={
+        "summary": _CALENDAR_NAME,
+        "description": "Workouts planned in TriFlow.",
+        "timeZone": _account_timezone(service),
+    }).execute()
     _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     _CAL_ID_FILE.write_text(created["id"])
     return created["id"]
