@@ -24,7 +24,7 @@ from domain.zones import compute_zones
 from domain.periodization import generate_week
 from domain.athlete import RACE_TYPES
 
-OUT_PATH = r"C:\Users\david\Downloads\TriFlow_Training_Plan_2026-07-05_to_2026-10-18.pdf"
+OUT_DIR = r"C:\Users\david\Downloads"
 
 SPORT_LABEL = {
     "swim": "Swim", "bike_outdoor": "Bike (Outdoor)", "bike_indoor": "Bike (Indoor)",
@@ -230,7 +230,9 @@ def build_pdf(test_mode: bool = False) -> None:
         if test_mode and weeks_done >= 2:
             break
 
-    out_path = OUT_PATH.replace(".pdf", "_TEST.pdf") if test_mode else OUT_PATH
+    start_label = (today - timedelta(days=today.weekday())).isoformat()
+    suffix = "_TEST" if test_mode else ""
+    out_path = rf"{OUT_DIR}\TriFlow_Training_Plan_{start_label}_to_{race_date.isoformat()}{suffix}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=LETTER,
                             topMargin=0.75 * inch, bottomMargin=0.75 * inch,
                             leftMargin=0.75 * inch, rightMargin=0.75 * inch,

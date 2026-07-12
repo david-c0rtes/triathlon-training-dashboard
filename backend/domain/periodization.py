@@ -9,7 +9,7 @@ from domain.workout import (
     Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout, load_group
 )
 from domain import library
-from domain.training_load import DEFAULT_TSS_PER_HOUR, STRENGTH_TSS_PER_HOUR
+from domain.training_load import DEFAULT_TSS_PER_HOUR
 from domain.fitness import advance_fitness
 
 
@@ -262,19 +262,21 @@ def _scale_workout(workout: Workout, factor: float) -> None:
                 scale_step(s)
 
 
-def _scale_group_to_target(workouts: list[Workout], group: str, target_tss: float) -> None:
-    """Scale all workouts in a load group so their combined TSS ≈ target_tss."""
+def _scale_group_to_target(workouts: list[Workout], group: str, target: float,
+                           measure=Workout.planned_tss) -> None:
+    """Scale all workouts in a load group so their combined `measure` ≈ target."""
     members = [w for w in workouts if load_group(w.sport) == group]
-    base = sum(w.planned_tss() for w in members)
-    if base <= 0 or target_tss <= 0:
+    base = sum(measure(w) for w in members)
+    if base <= 0 or target <= 0:
         return
-    factor = target_tss / base
+    factor = target / base
     for w in members:
         _scale_workout(w, factor)
 
 
-def _scale_group_to_target_weighted(workouts: list[Workout], group: str, target_tss: float,
-                                    long_workout: Workout | None, weekend_bias: float = 0.70) -> None:
+def _scale_group_to_target_weighted(workouts: list[Workout], group: str, target: float,
+                                    long_workout: Workout | None, weekend_bias: float = 0.70,
+                                    measure=Workout.planned_tss) -> None:
     """
     Like _scale_group_to_target, but when RAMPING LOAD UP, bias most of the
     added volume onto the weekend long session rather than spreading it evenly
@@ -282,16 +284,16 @@ def _scale_group_to_target_weighted(workouts: list[Workout], group: str, target_
     Cuts (recovery/taper weeks) fall back to a uniform scale in both directions.
     """
     members = [w for w in workouts if load_group(w.sport) == group]
-    base_total = sum(w.planned_tss() for w in members)
-    if base_total <= 0 or target_tss <= 0:
+    base_total = sum(measure(w) for w in members)
+    if base_total <= 0 or target <= 0:
         return
-    deficit = target_tss - base_total
+    deficit = target - base_total
     if long_workout is None or long_workout not in members or deficit <= 0:
-        _scale_group_to_target(workouts, group, target_tss)
+        _scale_group_to_target(workouts, group, target, measure=measure)
         return
 
     others = [w for w in members if w is not long_workout]
-    base_long = long_workout.planned_tss()
+    base_long = measure(long_workout)
     base_others = base_total - base_long
 
     long_factor = (base_long + deficit * weekend_bias) / base_long if base_long > 0 else 1.0
@@ -495,24 +497,30 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     n_tri = _tri_sessions_for_hours(profile.goals.weekly_hours_available)
     counts = _allocate_sessions(present, n_tri, dist)
 
+    # sport_distribution is a TIME share, not a TSS share — running (and other
+    # high-intensity sports) accrue TSS much faster per hour than cycling, so
+    # splitting the weekly TSS target by these percentages directly would give
+    # "30% run" far less than 30% of the week's minutes. Convert the TSS target
+    # to a minutes budget via the blended rate first, then split that by time.
+    rate = weighted_tss_per_hour(profile)
+    total_target_minutes = target_tss / rate * 60 if rate > 0 else 0.0
+
     # Strength — phase-capped session count, capped at a realistic duration.
-    # Computed up front (not after endurance scaling) so any TSS its capped
-    # duration can't absorb flows into the endurance sports below, instead of
+    # Computed up front (not after endurance scaling) so any minutes its capped
+    # duration can't absorb flow into the endurance sports below, instead of
     # just vanishing or ballooning into unrealistic 90+ minute lifting sessions.
     n_strength = min(profile.preferences.strength_sessions_per_week,
                      _STRENGTH_PHASE_CAP.get(phase, 1))
     if "swim" in counts:
         n_strength = min(n_strength, counts["swim"])
-    strength_target = target_tss * dist.get("strength", 0.0)
+    strength_target_min = total_target_minutes * dist.get("strength", 0.0)
     strength_session_min = 0
-    leftover_strength_tss = 0.0
-    if n_strength > 0 and strength_target > 0:
-        total_minutes = (strength_target / STRENGTH_TSS_PER_HOUR) * 60
-        strength_session_min = max(20, min(45, round(total_minutes / n_strength)))
-        realized_tss = (strength_session_min * n_strength / 60) * STRENGTH_TSS_PER_HOUR
-        leftover_strength_tss = max(0.0, strength_target - realized_tss)
+    leftover_strength_min = 0.0
+    if n_strength > 0 and strength_target_min > 0:
+        strength_session_min = max(20, min(45, round(strength_target_min / n_strength)))
+        leftover_strength_min = max(0.0, strength_target_min - strength_session_min * n_strength)
     else:
-        leftover_strength_tss = strength_target
+        leftover_strength_min = strength_target_min
 
     # Weekly intensity floor: 1 interval session (≤5 tri sessions) or 2 (≥6),
     # never the same sport twice (spread rule); limiter discipline gets first
@@ -575,21 +583,23 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
             title, steps = fn(phase_name, dose, rng, size_ratio)
             workouts.append(_mk(Sport.RUN, next(_weekdays), title, steps))
 
-    # Scale each present sport group to its share of the weekly target (plus
-    # any strength TSS its capped duration couldn't absorb), renormalizing
-    # shares of disciplines this race doesn't include. Bike/run bias load
-    # growth onto their weekend long session; swim scales uniformly.
+    # Scale each present sport group to its share of the weekly TIME budget
+    # (plus any strength minutes its capped duration couldn't absorb),
+    # renormalizing shares of disciplines this race doesn't include. Bike/run
+    # bias load growth onto their weekend long session; swim scales uniformly.
+    minutes_measure = lambda w: w.total_duration_minutes  # noqa: E731
     tri_shares = {s: dist.get(s, 0.0) for s in ("swim", "bike", "run")}
     present_sum = sum(tri_shares[s] for s in present) or 1.0
     missing_sum = sum(v for s, v in tri_shares.items() if s not in present)
     long_workout_by_group = {"bike": bike_long_workout, "run": run_long_workout}
     for group in present:
         share = tri_shares[group] + missing_sum * (tri_shares[group] / present_sum)
-        target = target_tss * share + leftover_strength_tss * (tri_shares[group] / present_sum)
+        target_min = total_target_minutes * share + leftover_strength_min * (tri_shares[group] / present_sum)
         if group in long_workout_by_group:
-            _scale_group_to_target_weighted(workouts, group, target, long_workout_by_group[group])
+            _scale_group_to_target_weighted(workouts, group, target_min, long_workout_by_group[group],
+                                            measure=minutes_measure)
         else:
-            _scale_group_to_target(workouts, group, target)
+            _scale_group_to_target(workouts, group, target_min, measure=minutes_measure)
 
     # Swim durations re-derive from (scaled) distances
     for w in workouts:
