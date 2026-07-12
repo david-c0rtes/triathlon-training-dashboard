@@ -1,8 +1,8 @@
 import { useEffect, useState, Fragment } from "react";
 import type { ReactNode } from "react";
-import { Save } from "lucide-react";
+import { Save, RefreshCw } from "lucide-react";
 import { api } from "../api/client";
-import type { AthleteProfile, ZonesResponse, ZoneOut, RaceTypeOption } from "../api/types";
+import type { AthleteProfile, ZonesResponse, ZoneOut, RaceTypeOption, GarminMaxMetrics } from "../api/types";
 import { Card, SectionTitle, MonoLabel } from "../components/Card";
 import { secToMmss, mmssToSec, secToHhmm, hhmmToSec } from "../lib/format";
 
@@ -36,6 +36,9 @@ export function Settings() {
   const [raceTypes, setRaceTypes] = useState<RaceTypeOption[]>([]);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [errMsg, setErrMsg] = useState("");
+  const [garmin, setGarmin] = useState<GarminMaxMetrics | null>(null);
+  const [garminState, setGarminState] = useState<"idle" | "loading" | "error">("idle");
+  const [garminErr, setGarminErr] = useState("");
 
   useEffect(() => {
     api.profile().then((p) => { setProfile(p); setForm(toForm(p)); }).catch((e) => setErrMsg(String(e)));
@@ -137,6 +140,16 @@ export function Settings() {
     }
   }
 
+  async function syncGarmin() {
+    setGarminState("loading"); setGarminErr("");
+    try {
+      setGarmin(await api.garminMaxMetrics());
+      setGarminState("idle");
+    } catch (e) {
+      setGarminState("error"); setGarminErr(String(e));
+    }
+  }
+
   return (
     <div className="p-5 md:p-8 max-w-[900px] mx-auto flex flex-col gap-6">
       <header className="flex items-center justify-between">
@@ -226,7 +239,18 @@ export function Settings() {
 
       {/* Thresholds & zones */}
       <Card>
-        <SectionTitle>Thresholds</SectionTitle>
+        <div className="flex items-center justify-between">
+          <SectionTitle>Thresholds</SectionTitle>
+          <button
+            onClick={syncGarmin}
+            disabled={garminState === "loading"}
+            className="flex items-center gap-1.5 rounded border border-outline-variant/50 text-xs font-medium px-2.5 py-1.5 hover:bg-surface-container-high disabled:opacity-60 mb-3"
+          >
+            <RefreshCw size={13} className={garminState === "loading" ? "animate-spin" : ""} />
+            {garminState === "loading" ? "Syncing…" : "Sync from Garmin"}
+          </button>
+        </div>
+        {garminState === "error" && <p className="text-error font-mono text-xs mb-3">{garminErr}</p>}
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="Bike FTP (watts)"><NumInput value={form.ftp} onChange={(v) => set("ftp", v)} /></Field>
           <Field label="Max HR (bpm)"><NumInput value={form.maxHr} onChange={(v) => set("maxHr", v)} /></Field>
@@ -234,6 +258,49 @@ export function Settings() {
           <Field label="Run LTHR (bpm)"><NumInput value={form.lthr} onChange={(v) => set("lthr", v)} /></Field>
           <Field label="Swim CSS (mm:ss /100m)"><TextInput value={form.swimCss} onChange={(v) => set("swimCss", v)} placeholder="1:35" /></Field>
         </div>
+
+        {garmin && (
+          <div className="mt-5 pt-4 border-t border-outline-variant/30">
+            <MonoLabel>Garmin sync — review before applying</MonoLabel>
+            <div className="flex flex-col gap-2 mt-3">
+              <GarminField
+                label="Bike FTP"
+                current={`${form.ftp} W`}
+                garminValue={garmin.ftp_watts}
+                plausible={garmin.ftp_plausible}
+                format={(v) => `${v} W`}
+                extra={garmin.ftp_source ? ` (${garmin.ftp_source.toLowerCase()}${garmin.ftp_date ? `, ${garmin.ftp_date}` : ""})` : ""}
+                onUse={() => set("ftp", garmin.ftp_watts!)}
+              />
+              <GarminField
+                label="Run LTHR"
+                current={`${form.lthr} bpm`}
+                garminValue={garmin.run_lthr}
+                plausible={garmin.run_lthr_plausible}
+                format={(v) => `${v} bpm`}
+                extra={garmin.run_lthr_auto_detected ? " (auto-detected)" : ""}
+                onUse={() => set("lthr", garmin.run_lthr!)}
+              />
+              <GarminField
+                label="Run threshold pace"
+                current={`${form.runPace} /km`}
+                garminValue={garmin.run_threshold_pace_sec_per_km}
+                plausible={garmin.run_pace_plausible}
+                format={(v) => `${secToMmss(v)} /km`}
+                onUse={() => set("runPace", secToMmss(garmin.run_threshold_pace_sec_per_km!))}
+              />
+              {garmin.vo2max_running != null && (
+                <p className="text-xs text-on-surface-variant font-mono mt-1">
+                  VO2max running (informational): {garmin.vo2max_running}
+                </p>
+              )}
+            </div>
+            <p className="text-[11px] text-on-surface-variant mt-3">
+              “Use” pre-fills the field above — nothing is saved until you hit Save. Swim CSS and Max HR aren’t
+              available from Garmin and stay manual.
+            </p>
+          </div>
+        )}
 
         {zones && (
           <div className="mt-5 pt-4 border-t border-outline-variant/30">
@@ -327,6 +394,32 @@ function TextInput({ value, onChange, placeholder }: { value: string; onChange: 
 
 function NumInput({ value, onChange, step }: { value: number; onChange: (v: number) => void; step?: number }) {
   return <input type="number" step={step ?? 1} className={inputCls} value={Number.isNaN(value) ? "" : value} onChange={(e) => onChange(parseFloat(e.target.value))} />;
+}
+
+function GarminField({ label, current, garminValue, plausible, format, onUse, extra }: {
+  label: string;
+  current: string;
+  garminValue: number | null;
+  plausible: boolean;
+  format: (v: number) => string;
+  onUse: () => void;
+  extra?: string;
+}) {
+  const has = garminValue != null;
+  const bad = has && !plausible;
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="text-on-surface-variant w-36 shrink-0">{label}</span>
+      <span className="font-mono text-xs w-24 shrink-0">{current}</span>
+      <span className="text-on-surface-variant">→</span>
+      <span className={`font-mono text-xs flex-1 ${bad ? "text-error" : "text-on-surface-variant"}`}>
+        {has ? `${format(garminValue)}${extra ?? ""}${bad ? " — looks implausible, skipped" : ""}` : "not available from Garmin"}
+      </span>
+      {has && !bad && (
+        <button onClick={onUse} className="text-xs font-medium text-primary hover:underline shrink-0">Use</button>
+      )}
+    </div>
+  );
 }
 
 function ZoneTable({ title, zones, unit, fmt, pace }: {

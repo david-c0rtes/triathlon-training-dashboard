@@ -87,3 +87,71 @@ def fetch_activities(days: int = 90) -> list[GarminActivity]:
 
     activities = [_parse(raw) for raw in raw_activities]
     return sorted(activities, key=lambda a: a.start_date)
+
+
+# Sanity bounds used only to flag obviously-corrupt Garmin data (seen in
+# practice: a stale threshold-pace value that decoded to ~42 min/km). A field
+# outside its bounds is still returned, just marked implausible so the caller
+# doesn't offer it as a one-click "use this".
+_FTP_BOUNDS = (60.0, 500.0)          # watts
+_LTHR_BOUNDS = (100.0, 220.0)        # bpm
+_RUN_PACE_BOUNDS = (150.0, 600.0)    # sec/km: 2:30/km .. 10:00/km
+
+
+def _in_bounds(value: float | None, bounds: tuple[float, float]) -> bool:
+    return value is not None and bounds[0] <= value <= bounds[1]
+
+
+def fetch_max_metrics() -> dict:
+    """
+    Garmin's own best-known bike FTP and running LTHR/threshold-pace (+ VO2max
+    running for context). Read-only: never writes to Garmin or the local
+    profile — the caller decides what, if anything, to do with the result.
+    """
+    client = get_client()
+
+    ftp_watts = ftp_source = ftp_date = None
+    try:
+        raw = client.get_cycling_ftp()
+        if isinstance(raw, list):
+            raw = raw[0] if raw else {}
+        ftp_watts = _to_float(raw.get("functionalThresholdPower"))
+        ftp_source = raw.get("biometricSourceType")
+        ftp_date = (raw.get("calendarDate") or "")[:10] or None
+    except Exception:
+        pass
+
+    run_lthr = run_pace_sec_per_km = None
+    try:
+        lt = client.get_lactate_threshold(latest=True)
+        shr = lt.get("speed_and_heart_rate", {})
+        run_lthr = _to_float(shr.get("heartRate"))
+        speed = _to_float(shr.get("speed"))
+        if speed:
+            run_pace_sec_per_km = 1000.0 / speed
+    except Exception:
+        pass
+
+    lthr_auto_detected = vo2max_running = None
+    try:
+        user_data = client.get_user_profile().get("userData", {})
+        lthr_auto_detected = user_data.get("thresholdHeartRateAutoDetected")
+        vo2max_running = _to_float(user_data.get("vo2MaxRunning"))
+    except Exception:
+        pass
+
+    return {
+        "ftp_watts": round(ftp_watts) if ftp_watts is not None else None,
+        "ftp_source": ftp_source,
+        "ftp_date": ftp_date,
+        "ftp_plausible": _in_bounds(ftp_watts, _FTP_BOUNDS),
+
+        "run_lthr": round(run_lthr) if run_lthr is not None else None,
+        "run_lthr_auto_detected": lthr_auto_detected,
+        "run_lthr_plausible": _in_bounds(run_lthr, _LTHR_BOUNDS),
+
+        "run_threshold_pace_sec_per_km": round(run_pace_sec_per_km, 1) if run_pace_sec_per_km is not None else None,
+        "run_pace_plausible": _in_bounds(run_pace_sec_per_km, _RUN_PACE_BOUNDS),
+
+        "vo2max_running": vo2max_running,
+    }

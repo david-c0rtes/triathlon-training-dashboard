@@ -4,7 +4,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from integrations.garmin import auth as garmin_auth
-from integrations.garmin.client import fetch_activities
+from integrations.garmin.client import fetch_activities, fetch_max_metrics
 from integrations.garmin.export import push_workout
 from integrations.garmin.zwo import workout_to_zwo, zwo_filename
 from integrations.garmin.tss import measured_tss_per_hour, daily_tss_by_group
@@ -63,6 +63,35 @@ def garmin_sync(days: int = 90) -> SyncResponse:
         atl=fitness.atl,
         tsb=fitness.tsb,
     )
+
+
+class MaxMetricsResponse(BaseModel):
+    ftp_watts: int | None
+    ftp_source: str | None
+    ftp_date: str | None
+    ftp_plausible: bool
+    run_lthr: int | None
+    run_lthr_auto_detected: bool | None
+    run_lthr_plausible: bool
+    run_threshold_pace_sec_per_km: float | None
+    run_pace_plausible: bool
+    vo2max_running: float | None
+
+
+@router.get("/max-metrics")
+def garmin_max_metrics() -> MaxMetricsResponse:
+    """
+    Garmin's own FTP / running LTHR + threshold pace, for the Settings
+    "Sync from Garmin" review panel. Read-only — never writes to the profile;
+    the frontend only pre-fills the form and the user still hits Save.
+    """
+    try:
+        data = fetch_max_metrics()
+    except EnvironmentError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Garmin Connect error: {e}")
+    return MaxMetricsResponse(**data)
 
 
 @router.get("/history")

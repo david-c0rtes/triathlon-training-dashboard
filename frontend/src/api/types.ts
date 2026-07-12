@@ -136,6 +136,19 @@ export interface GarminStatus {
   connected: boolean;
 }
 
+export interface GarminMaxMetrics {
+  ftp_watts: number | null;
+  ftp_source: string | null;
+  ftp_date: string | null;
+  ftp_plausible: boolean;
+  run_lthr: number | null;
+  run_lthr_auto_detected: boolean | null;
+  run_lthr_plausible: boolean;
+  run_threshold_pace_sec_per_km: number | null;
+  run_pace_plausible: boolean;
+  vo2max_running: number | null;
+}
+
 export interface PlanRangeDay {
   date: string;
   sessions: WorkoutSummary[];

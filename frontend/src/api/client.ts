@@ -1,5 +1,5 @@
 import type {
-  AthleteProfile, FullPlan, WeekPlan, DayPlan, GarminStatus,
+  AthleteProfile, FullPlan, WeekPlan, DayPlan, GarminStatus, GarminMaxMetrics,
   FitnessHistory, Insight, ZonesResponse, RaceTypeOption,
   NextSession, WorkoutDetail, PushResult,
   PlanRange, GoogleStatus, GooglePushResult,
@@ -84,6 +84,7 @@ export const api = {
     post<GooglePushResult>(`/google/push?start=${start}&end=${end}`),
   garminStatus: () => get<GarminStatus>("/garmin/status"),
   garminSync: (days = 90) => post<unknown>(`/garmin/sync?days=${days}`),
+  garminMaxMetrics: () => get<GarminMaxMetrics>("/garmin/max-metrics"),
   history: (days = 90) => get<FitnessHistory>(`/garmin/history?days=${days}`),
   insights: () => get<Insight>("/insights"),
 
