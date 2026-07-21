@@ -24,6 +24,36 @@ def garmin_status():
     return {"connected": garmin_auth.is_authenticated()}
 
 
+class GarminLinkIn(BaseModel):
+    email: str
+    password: str
+    mfa_code: str | None = None
+
+
+@router.post("/link")
+def garmin_link(body: GarminLinkIn):
+    """
+    Link a Garmin account: one-time credential exchange for session tokens.
+    Credentials transit this localhost API once and are never stored or
+    logged; only the resulting tokens are kept. 409 "mfa_required" means
+    resubmit with the one-time code Garmin just sent the user.
+    """
+    try:
+        garmin_auth.link_account(body.email, body.password, body.mfa_code)
+    except garmin_auth.GarminMFARequired:
+        raise HTTPException(status_code=409, detail="mfa_required")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Garmin login failed: {e}")
+    return {"connected": True}
+
+
+@router.post("/unlink")
+def garmin_unlink():
+    """Forget the stored Garmin session (workouts already pushed stay on Garmin)."""
+    garmin_auth.unlink()
+    return {"connected": False}
+
+
 class SyncResponse(BaseModel):
     activities_fetched: int
     date_range_days: int

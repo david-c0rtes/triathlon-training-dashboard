@@ -2,7 +2,7 @@ import type {
   AthleteProfile, FullPlan, WeekPlan, DayPlan, GarminStatus, GarminMaxMetrics,
   FitnessHistory, Insight, ZonesResponse, RaceTypeOption,
   NextSession, WorkoutDetail, PushResult,
-  PlanRange, GoogleStatus, GooglePushResult,
+  PlanRange, GoogleStatus, GooglePushResult, VersionInfo,
 } from "./types";
 
 // Empty base = same-origin (the desktop app: FastAPI serves the built SPA).
@@ -95,8 +95,12 @@ export const api = {
   garminStatus: () => get<GarminStatus>("/garmin/status"),
   garminSync: (days = 90) => post<unknown>(`/garmin/sync?days=${days}`),
   garminMaxMetrics: () => get<GarminMaxMetrics>("/garmin/max-metrics"),
+  garminLink: (email: string, password: string, mfaCode?: string) =>
+    postJson<GarminStatus>("/garmin/link", { email, password, mfa_code: mfaCode || null }),
+  garminUnlink: () => post<GarminStatus>("/garmin/unlink"),
   history: (days = 90) => get<FitnessHistory>(`/garmin/history?days=${days}`),
   insights: () => get<Insight>("/insights"),
+  version: () => get<VersionInfo>("/version"),
 
   // Download the .zwo for an edited indoor-bike workout (triggers a file save).
   async downloadZwo(w: WorkoutDetail): Promise<void> {

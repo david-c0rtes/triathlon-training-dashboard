@@ -2,6 +2,7 @@ import { useEffect, useState, Fragment } from "react";
 import { api } from "../api/client";
 import type { AthleteProfile, RaceTypeOption } from "../api/types";
 import { Field, TextInput, NumInput, inputCls } from "../components/FormControls";
+import { GarminConnect } from "../components/GarminConnect";
 import { GarminSync } from "../components/GarminSync";
 import { mmssToSec, hhmmToSec } from "../lib/format";
 
@@ -237,6 +238,15 @@ export function Onboarding({ onComplete }: { onComplete: (p: AthleteProfile) => 
               </div>
             </div>
           )}
+        </section>
+
+        <section className="flex flex-col gap-4 pt-4 border-t border-outline-variant/30">
+          <h2 className="font-display font-semibold text-lg text-on-surface">Connect Garmin</h2>
+          <p className="text-on-surface-variant text-sm">
+            Optional, but linking now lets you pull your current FTP and heart-rate benchmarks straight
+            into the fields below. You can also skip this and link later in Settings.
+          </p>
+          <GarminConnect />
         </section>
 
         <section className="flex flex-col gap-4 pt-4 border-t border-outline-variant/30">

@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { AthleteProfile, ZonesResponse, ZoneOut, RaceTypeOption } from "../api/types";
 import { Card, SectionTitle, MonoLabel } from "../components/Card";
 import { Field, TextInput, NumInput, inputCls } from "../components/FormControls";
+import { GarminConnect } from "../components/GarminConnect";
 import { GarminSync } from "../components/GarminSync";
 import { secToMmss, mmssToSec, secToHhmm, hhmmToSec } from "../lib/format";
 
@@ -293,6 +294,12 @@ export function Settings() {
         <div className="mt-4 max-w-xs">
           <Field label="Strength sessions / week"><NumInput value={form.strengthSessions} onChange={(v) => set("strengthSessions", v)} /></Field>
         </div>
+      </Card>
+
+      {/* Connections */}
+      <Card>
+        <SectionTitle>Connections</SectionTitle>
+        <GarminConnect />
       </Card>
     </div>
   );

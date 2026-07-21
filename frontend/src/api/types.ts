@@ -141,6 +141,13 @@ export interface GarminStatus {
   connected: boolean;
 }
 
+export interface VersionInfo {
+  current: string;
+  latest: string | null;
+  latest_url: string | null;
+  update_available: boolean;
+}
+
 export interface GarminMaxMetrics {
   ftp_watts: number | null;
   ftp_source: string | null;

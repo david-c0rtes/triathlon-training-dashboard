@@ -1,9 +1,14 @@
 from __future__ import annotations
 import os
+import shutil
 
 from garminconnect import Garmin
 
 import apppaths
+
+
+class GarminMFARequired(Exception):
+    """Login needs a one-time MFA code — resubmit credentials with the code."""
 
 
 def _token_dir():
@@ -11,11 +16,38 @@ def _token_dir():
 
 
 def _credentials() -> tuple[str, str]:
+    # Dev fallback only — the app's real flow is link_account(), from Settings
+    # or the onboarding wizard.
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASSWORD")
     if not email or not password:
-        raise EnvironmentError("GARMIN_EMAIL and GARMIN_PASSWORD must be set in .env")
+        raise EnvironmentError("Garmin isn't linked yet — connect your account first.")
     return email, password
+
+
+def link_account(email: str, password: str, mfa_code: str | None = None) -> None:
+    """
+    Exchange Garmin credentials for session tokens, once. The credentials are
+    used for this single login and never persisted — only the resulting garth
+    tokens are stored (in the app-data dir). If the account has MFA and no
+    code was provided, raises GarminMFARequired so the UI can ask for one.
+    """
+    def _mfa() -> str:
+        if mfa_code:
+            return mfa_code
+        raise GarminMFARequired()
+
+    client = Garmin(email=email, password=password, prompt_mfa=_mfa)
+    client.login()
+
+    token_dir = _token_dir()
+    token_dir.mkdir(parents=True, exist_ok=True)
+    client.client.dump(str(token_dir))
+
+
+def unlink() -> None:
+    """Forget the stored Garmin session tokens."""
+    shutil.rmtree(_token_dir(), ignore_errors=True)
 
 
 def get_client() -> Garmin:
