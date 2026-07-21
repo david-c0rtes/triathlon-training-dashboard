@@ -4,7 +4,9 @@ from datetime import date, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
 
-from domain.athlete import AthleteProfile, Fitness, race_distances, Discipline
+from domain.athlete import (
+    AthleteProfile, Fitness, race_distances, Discipline, RaceGoal, RaceType,
+)
 from domain.workout import (
     Sport, Target, TargetType, WorkoutStep, RepeatBlock, Workout, load_group
 )
@@ -79,29 +81,53 @@ def get_phase(profile: AthleteProfile, today: date) -> Phase:
     return Phase.BASE
 
 
-# The CTL-anchored ramp already drives progression, so build phases sit at/above
-# maintenance (>= 1.0). Sub-1.0 here would detrain. Peak carries the heaviest
-# weekend-loaded volume (see _scale_group_to_target_weighted) before a sharp
-# taper cuts fatigue ahead of race day.
-PHASE_MODIFIERS = {
-    Phase.BASE: 1.00,
-    Phase.BUILD: 1.20,
-    Phase.PEAK: 1.55,
-    Phase.TAPER: 0.55,
+# The athlete's declared weekly hours are the VOLUME ANCHOR: each phase plans
+# a fraction of them, so volume scales linearly with hours at every level.
+# On 10h declared this yields Base ~5.5h ramping to Peak ~8h — the shape the
+# user specified. (The old CTL-anchored target was dropped 2026-07-17: hours
+# had zero effect for any athlete whose fitness outpaced their schedule.)
+_PHASE_HOURS_FRACTION = {
+    Phase.BASE: 0.55,
+    Phase.BUILD: 0.68,
+    Phase.PEAK: 0.80,
+    Phase.TAPER: 0.30,
 }
 
 # Within a Base/Build 3-week loading block, volume steps up each week
 # (dose 0 -> 1 -> 2) before the block's 4th week resets via the recovery cut.
 _DOSE_LOAD_MULTIPLIER = {0: 1.00, 1: 1.08, 2: 1.16}
 
+# Typical mid-pack finish HOURS per race — the yardstick for how ambitious a
+# target time is. Custom races scale the 70.3 reference by race size instead.
+_TYPICAL_FINISH_HOURS = {
+    RaceType.SUPERSPRINT_TRI: 0.75, RaceType.SUPERSPRINT_DU: 0.75,
+    RaceType.SPRINT_TRI: 1.5, RaceType.SPRINT_DU: 1.4,
+    RaceType.SPRINT_AQUATHLON: 0.8, RaceType.SPRINT_AQUABIKE: 1.1,
+    RaceType.OLYMPIC_TRI: 3.0, RaceType.OLYMPIC_DU: 2.8,
+    RaceType.T100: 5.25, RaceType.MIDDLE_TRI: 6.0,
+    RaceType.LONG_TRI: 12.5, RaceType.DOUBLE_LONG_TRI: 27.0,
+}
 
-def _ramp_for_weeks(weeks_to_race: float) -> float:
-    """CTL ramp rate per week — steeper when the race is closer."""
-    if weeks_to_race <= 8:
-        return 0.09
-    if weeks_to_race >= 24:
-        return 0.04
-    return 0.09 + (0.04 - 0.09) * (weeks_to_race - 8) / (24 - 8)
+
+def intensity_tier(profile: AthleteProfile) -> int:
+    """
+    How hard the plan should skew for the athlete's goal on their hours:
+    0 = standard 80/20; 1 = aggressive (goal is "compete", or the target time
+    is meaningfully faster than typical for the distance). Two athletes on the
+    same 10h/week chasing 4:30 vs 6:00 in a 70.3 get visibly different plans:
+    the 4:30 athlete draws an extra interval session, hotter session flavors,
+    and race-pace finishes on long sessions from Base onward.
+    """
+    g = profile.goals
+    if g.goal == RaceGoal.COMPETE:
+        return 1
+    if g.goal == RaceGoal.TARGET_TIME and g.target_finish_seconds:
+        typical_h = _TYPICAL_FINISH_HOURS.get(g.race_type)
+        typical = (typical_h * 3600 if typical_h
+                   else 6.0 * 3600 * race_size_ratio(profile))
+        if g.target_finish_seconds <= typical * 0.88:
+            return 1
+    return 0
 
 
 def _tsb_multiplier(tsb: float) -> float:
@@ -129,37 +155,29 @@ def weekly_tss_target(profile: AthleteProfile, phase: Phase,
     """
     Compute the week's TSS target and a human-readable rationale.
 
-    CTL-anchored progressive build (ramp scales with weeks-to-race), capped by
-    the weighted available hours, reduced in recovery weeks (every 4th), and
-    modulated by current TSB. Cold-starts from an hours-based baseline.
+    HOURS-ANCHORED: the declared weekly hours × the phase's fraction is the
+    volume backbone (scales linearly with hours — no plateau), stepped up
+    within each 3-week loading block, cut on recovery weeks, and modulated by
+    current TSB. CTL only gates a gentle cold-start ease-in.
 
     `fitness` overrides profile.fitness (used by forward simulation so each
     projected week is planned against its simulated CTL/ATL/TSB).
     """
     fit = fitness or profile.fitness
-    ctl = fit.ctl
     tsb = fit.tsb
-    ramp = _ramp_for_weeks(weeks_to_race)
-
-    ctl_based = max(ctl, 1.0) * 7 * (1 + ramp)
     rate = weighted_tss_per_hour(profile)
-    hours_cap = profile.goals.weekly_hours_available * rate
+    hours = profile.goals.weekly_hours_available
+    frac = _PHASE_HOURS_FRACTION.get(phase, 0.55)
 
-    if ctl < 10:
-        target = hours_cap * 0.6
-        anchor = "cold-start (low CTL) -> gentle hours-based baseline"
-    elif ctl_based <= hours_cap:
-        target = ctl_based
-        anchor = f"CTL-anchored (CTL {ctl:.0f} x 7 x +{ramp * 100:.0f}% ramp)"
-    else:
-        target = hours_cap
-        anchor = f"hours-capped ({profile.goals.weekly_hours_available:.0f}h x {rate:.0f} TSS/h)"
-
-    target *= PHASE_MODIFIERS.get(phase, 1.0)
+    target = hours * frac * rate
+    anchor = f"hours-anchored ({hours:g}h x {frac:.0%} {phase.value} x {rate:.0f} TSS/h)"
+    if fit.ctl < 10:
+        target *= 0.85
+        anchor += "; cold-start ease-in (-15%)"
 
     # Within a 3-week loading block, volume climbs week to week (dose 0->1->2)
     # before the 4th week's recovery cut — without this, Base/Build weeks at
-    # the same CTL/phase were nearly identical week over week.
+    # the same phase were nearly identical week over week.
     dose, is_recovery = _dose_for_week(weeks_to_race, phase)
     if phase in (Phase.BASE, Phase.BUILD):
         target *= _DOSE_LOAD_MULTIPLIER.get(dose, 1.0)
@@ -168,10 +186,9 @@ def weekly_tss_target(profile: AthleteProfile, phase: Phase,
 
     target *= _tsb_multiplier(tsb)
 
-    # Never plan meaningfully more than the athlete said they have available,
-    # even after phase/TSB multipliers stack — mainly guards low-hour athletes
-    # whose Base week is already hours-capped from a Peak week blowing past it.
-    target = min(target, hours_cap * 1.15)
+    # Even with every multiplier stacked, never plan meaningfully beyond what
+    # the athlete said they actually have available.
+    target = min(target, hours * rate * 1.05)
 
     notes = [anchor, f"{phase.value} phase"]
     if is_recovery:
@@ -494,6 +511,12 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     if is_recovery:
         dose = 0
 
+    # Goal-driven intensity: an ambitious target time (or "compete") skews the
+    # SAME volume hotter — sessions draw a bumped dose, harder flavor menus,
+    # and one extra interval session (see the floor below).
+    aggressive = intensity_tier(profile) > 0
+    lib_dose = min(2, dose + 1) if aggressive else dose
+
     n_tri = _tri_sessions_for_hours(profile.goals.weekly_hours_available)
     counts = _allocate_sessions(present, n_tri, dist)
 
@@ -523,9 +546,9 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
         leftover_strength_min = strength_target_min
 
     # Weekly intensity floor: 1 interval session (≤5 tri sessions) or 2 (≥6),
-    # never the same sport twice (spread rule); limiter discipline gets first
-    # claim on quality more often than not.
-    n_intervals = min(1 if n_tri <= 5 else 2, len(present))
+    # +1 for aggressive goals — never the same sport twice (spread rule);
+    # limiter discipline gets first claim on quality more often than not.
+    n_intervals = min((1 if n_tri <= 5 else 2) + (1 if aggressive else 0), len(present))
     limiter = profile.goals.limiter_discipline.value if profile.goals.limiter_discipline else None
     interval_sports: list[str] = []
     if limiter in present and rng.random() < 0.6:
@@ -544,7 +567,7 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     for i in range(counts.get("swim", 0)):
         quality = "swim" in interval_sports and i == 0
         fn = library.swim_quality if quality else library.swim_easy
-        title, steps = fn(phase_name, dose, rng, css, size_ratio)
+        title, steps = fn(phase_name, lib_dose, rng, css, size_ratio)
         workouts.append(_mk(Sport.SWIM, next(_weekdays), title, steps))
 
     # Bike — weekend long ride (or race-sim brick in Peak) + weekday sessions.
@@ -559,13 +582,17 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
                 bike_long_workout = build_brick_session(sat, phase, ftp, tp, css,
                                                         max_hr=max_hr, lthr=lthr, size_ratio=size_ratio)
             else:
-                title, steps = library.bike_long(phase_name, dose, rng, size_ratio)
+                title, steps = library.bike_long(phase_name, lib_dose, rng, size_ratio,
+                                                 aggressive=aggressive)
                 bike_long_workout = _mk(Sport.BIKE_OUTDOOR, sat, title, steps)
             workouts.append(bike_long_workout)
         for i in range(n_bike - (1 if has_long else 0)):
             quality = "bike" in interval_sports and i == 0
-            fn = library.bike_quality if quality else library.bike_easy
-            title, steps = fn(phase_name, dose, rng, size_ratio)
+            if quality:
+                title, steps = library.bike_quality(phase_name, lib_dose, rng, size_ratio,
+                                                    aggressive=aggressive)
+            else:
+                title, steps = library.bike_easy(phase_name, lib_dose, rng, size_ratio)
             workouts.append(_mk(Sport.BIKE_INDOOR, next(_weekdays), title, steps))
 
     # Run — weekend long run + weekday sessions (same weekend-bias tracking)
@@ -574,13 +601,17 @@ def generate_week(profile: AthleteProfile, week_start: date | None = None,
     if n_run:
         has_long = (n_run >= 2 or "run" not in interval_sports) and phase != Phase.TAPER
         if has_long:
-            title, steps = library.run_long(phase_name, dose, rng, size_ratio)
+            title, steps = library.run_long(phase_name, lib_dose, rng, size_ratio,
+                                            aggressive=aggressive)
             run_long_workout = _mk(Sport.RUN, sun, title, steps)
             workouts.append(run_long_workout)
         for i in range(n_run - (1 if has_long else 0)):
             quality = "run" in interval_sports and i == 0
-            fn = library.run_quality if quality else library.run_easy
-            title, steps = fn(phase_name, dose, rng, size_ratio)
+            if quality:
+                title, steps = library.run_quality(phase_name, lib_dose, rng, size_ratio,
+                                                   aggressive=aggressive)
+            else:
+                title, steps = library.run_easy(phase_name, lib_dose, rng, size_ratio)
             workouts.append(_mk(Sport.RUN, next(_weekdays), title, steps))
 
     # Scale each present sport group to its share of the weekly TIME budget

@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from domain.athlete import (
-    AthleteProfile, Goals, Thresholds, RaceType, CustomLeg, Discipline,
+    AthleteProfile, Goals, Thresholds, RaceType, RaceGoal, CustomLeg, Discipline,
 )
 from domain.periodization import generate_week, Phase
 from domain.workout import Sport, TargetType, WorkoutStep
@@ -139,6 +139,63 @@ def check(persona: str, profile: AthleteProfile) -> list[str]:
     return problems
 
 
+def hard_seconds(w) -> int:
+    """Total seconds spent at Z4+ (or ≥85% FTP) in a workout."""
+    total = 0
+    for item in w.steps:
+        pairs = ([(item, 1)] if isinstance(item, WorkoutStep)
+                 else [(s, item.repeat_count) for s in item.steps])
+        for s, n in pairs:
+            t = s.target
+            hot = ((t.zone or 0) >= 4
+                   or (t.type == TargetType.POWER_PERCENT_FTP and (t.pct_of_anchor or 0) >= 0.85))
+            if hot:
+                total += s.duration_seconds * n
+    return total
+
+
+def cross_profile_checks() -> list[str]:
+    """Invariants that compare PAIRS of profiles (hours scaling, goal intensity)."""
+    problems = []
+    today = date.today()
+    mon = today - timedelta(days=today.weekday())
+
+    # Declared hours are the volume anchor: double the hours ≈ double the time.
+    # Sum across 4 weeks (a full load/recovery block) so the ratio doesn't swing
+    # with whichever phase/dose today's calendar week happens to land on — a
+    # single recovery week's fixed session-floors would otherwise compress it.
+    lo = make_profile(RaceType.MIDDLE_TRI, 6, None, None)
+    hi = make_profile(RaceType.MIDDLE_TRI, 12, None, None)
+    weeks = [mon + timedelta(weeks=k) for k in range(4)]
+    min_lo = sum(w.total_duration_minutes for wk in weeks for w in generate_week(lo, week_start=wk).workouts)
+    min_hi = sum(w.total_duration_minutes for wk in weeks for w in generate_week(hi, week_start=wk).workouts)
+    print(f"  hours scaling (4-wk block): 6h persona plans {min_lo / 60:.1f}h, 12h persona plans {min_hi / 60:.1f}h")
+    if not min_hi > min_lo * 1.7:
+        problems.append(f"12h persona only plans {min_hi / min_lo:.2f}x the 6h persona's time (no hours scaling)")
+
+    # Ambitious target time on the same hours -> hotter block, not a bigger one.
+    # Measured over the 4-week block: total Z4+ ("hard") seconds is the robust
+    # signal; a single week's interval-sport COUNT saturates (easy-session
+    # strides incidentally hit Z5), so that's only required to be >=, not >.
+    std = make_profile(RaceType.MIDDLE_TRI, 10, None, None)
+    agg = make_profile(RaceType.MIDDLE_TRI, 10, None, None)
+    agg.goals.goal = RaceGoal.TARGET_TIME
+    agg.goals.target_finish_seconds = int(4.5 * 3600)  # 4h30 in a 70.3 — ambitious
+    wk_std = [generate_week(std, week_start=wk) for wk in weeks]
+    wk_agg = [generate_week(agg, week_start=wk) for wk in weeks]
+    ints_std = max(len({w.sport for w in wk.workouts if w.sport != Sport.STRENGTH and is_interval_workout(w)}) for wk in wk_std)
+    ints_agg = max(len({w.sport for w in wk.workouts if w.sport != Sport.STRENGTH and is_interval_workout(w)}) for wk in wk_agg)
+    hard_std = sum(hard_seconds(w) for wk in wk_std for w in wk.workouts if w.sport != Sport.STRENGTH)
+    hard_agg = sum(hard_seconds(w) for wk in wk_agg for w in wk.workouts if w.sport != Sport.STRENGTH)
+    print(f"  goal intensity (4-wk block): finish max {ints_std} interval sports / {hard_std // 60}min hard; "
+          f"4h30 target {ints_agg} / {hard_agg // 60}min hard")
+    if ints_agg < ints_std:
+        problems.append(f"4h30 target peaks at {ints_agg} interval sports vs finisher's {ints_std} — less varied intensity")
+    if hard_agg <= hard_std:
+        problems.append(f"4h30 target has {hard_agg}s hard vs finisher's {hard_std}s over the block — not hotter")
+    return problems
+
+
 def main() -> None:
     failures = 0
     for persona, race_type, hours, limiter, legs in PERSONAS:
@@ -149,6 +206,15 @@ def main() -> None:
             print(f"  PROBLEM: {p}")
         if not problems:
             print("  OK — all invariants hold")
+
+    print("\n== cross-profile (hours scaling + goal intensity) ==")
+    problems = cross_profile_checks()
+    for p in problems:
+        failures += 1
+        print(f"  PROBLEM: {p}")
+    if not problems:
+        print("  OK — all invariants hold")
+
     print(f"\n{'ALL PERSONAS PASS' if failures == 0 else f'{failures} PROBLEM(S)'}")
     raise SystemExit(0 if failures == 0 else 1)
 

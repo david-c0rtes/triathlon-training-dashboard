@@ -170,7 +170,8 @@ def swim_easy(phase: str, dose: int, rng: random.Random, css: float, size_ratio:
 
 # ── bike sessions (time-based only) ───────────────────────────────────────────
 
-def bike_quality(phase: str, dose: int, rng: random.Random, size_ratio: float):
+def bike_quality(phase: str, dose: int, rng: random.Random, size_ratio: float,
+                 aggressive: bool = False):
     wu = timed_step("Warm-up", 15, _pz(2))
     cd = timed_step("Cool-down", 10, _pz(1))
     flavors = {
@@ -203,7 +204,10 @@ def bike_quality(phase: str, dose: int, rng: random.Random, size_ratio: float):
              "Build": ["threshold", "sweet_spot", "vo2"],
              "Peak": ["vo2", "threshold"],
              "Taper": ["vo2"]}
-    pick = rng.choice(menus.get(phase, ["sweet_spot"]))
+    # Aggressive goals draw from the NEXT phase's menu — the 4:30-chaser rides
+    # threshold/VO2 flavors while the finisher is still on sweet spot.
+    menu_phase = {"Base": "Build", "Build": "Peak"}.get(phase, phase) if aggressive else phase
+    pick = rng.choice(menus.get(menu_phase, ["sweet_spot"]))
     title, main = flavors[pick]
     if phase == "Taper":  # sharpen, don't load
         main = RepeatBlock(repeat_count=max(2, main.repeat_count // 2), steps=main.steps)
@@ -225,12 +229,14 @@ def bike_easy(phase: str, dose: int, rng: random.Random, size_ratio: float):
     return f"Aerobic Ride ({phase})", steps
 
 
-def bike_long(phase: str, dose: int, rng: random.Random, size_ratio: float):
+def bike_long(phase: str, dose: int, rng: random.Random, size_ratio: float,
+              aggressive: bool = False):
     ratio = max(0.35, min(2.5, size_ratio))
     base = 90 if phase == "Base" else 110
     steps: list[StepOrBlock] = [timed_step("Warm-up", 15, _pz(2)),
                                 timed_step("Long endurance", round(base * ratio), _pz(2))]
-    if phase in ("Build", "Peak"):
+    # race-pace finishes arrive in Build normally, from Base for aggressive goals
+    if phase in ("Build", "Peak") or (aggressive and phase == "Base"):
         steps.append(timed_step("Tempo finish", 20, _pz(3), notes="race-effort focus"))
     steps.append(timed_step("Cool-down", 10, _pz(1)))
     return f"Long Ride ({phase})", steps
@@ -238,7 +244,8 @@ def bike_long(phase: str, dose: int, rng: random.Random, size_ratio: float):
 
 # ── run sessions ──────────────────────────────────────────────────────────────
 
-def run_quality(phase: str, dose: int, rng: random.Random, size_ratio: float):
+def run_quality(phase: str, dose: int, rng: random.Random, size_ratio: float,
+                aggressive: bool = False):
     wu = timed_step("Warm-up", 12, _rz(1))
     cd = timed_step("Cool-down", 8, _rz(1))
     flavors = {
@@ -269,7 +276,8 @@ def run_quality(phase: str, dose: int, rng: random.Random, size_ratio: float):
              "Build": ["cruise", "tempo", "progression"],
              "Peak": ["cruise", "progression"],
              "Taper": ["cruise"]}
-    pick = rng.choice(menus.get(phase, ["tempo"]))
+    menu_phase = {"Base": "Build", "Build": "Peak"}.get(phase, phase) if aggressive else phase
+    pick = rng.choice(menus.get(menu_phase, ["tempo"]))
     title, main = flavors[pick]
     if phase == "Taper" and isinstance(main, RepeatBlock):
         main = RepeatBlock(repeat_count=max(2, main.repeat_count // 2), steps=main.steps)
@@ -288,12 +296,13 @@ def run_easy(phase: str, dose: int, rng: random.Random, size_ratio: float):
     return f"Easy Run ({phase})", [timed_step("Easy run", 40, _rz(2))]
 
 
-def run_long(phase: str, dose: int, rng: random.Random, size_ratio: float):
+def run_long(phase: str, dose: int, rng: random.Random, size_ratio: float,
+             aggressive: bool = False):
     ratio = max(0.4, min(1.8, size_ratio))
     base = 70 if phase == "Base" else 85
     steps: list[StepOrBlock] = [timed_step("Warm-up", 10, _rz(1)),
                                 timed_step("Long run", round(base * ratio), _rz(2))]
-    if phase in ("Build", "Peak"):
+    if phase in ("Build", "Peak") or (aggressive and phase == "Base"):
         steps.append(timed_step("Race-pace finish", 15, _rz(3)))
     steps.append(timed_step("Cool-down", 8, _rz(1)))
     return f"Long Run ({phase})", steps
