@@ -262,6 +262,13 @@ def get_current_phase():
     return {"phase": phase.value, "weeks_to_race": weeks_to_race}
 
 
+@router.get("/version")
+def get_version():
+    """Current app version + whether a newer GitHub Release exists."""
+    from services.update_check import check_for_update
+    return check_for_update()
+
+
 @router.get("/insights")
 def get_insights():
     """AI coaching insight interpreting the current fitness + plan (Claude API)."""

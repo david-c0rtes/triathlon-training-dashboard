@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { LayoutDashboard, Dumbbell, CalendarDays, TrendingUp, Settings } from "lucide-react";
 import { GarminStatusBadge } from "./GarminStatusBadge";
+import { UpdateBanner } from "./UpdateBanner";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -52,8 +53,11 @@ export function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 min-w-0 pb-20 md:pb-0">
-        <Outlet />
+      <main className="flex-1 min-w-0 pb-20 md:pb-0 flex flex-col">
+        <UpdateBanner />
+        <div className="flex-1 min-w-0">
+          <Outlet />
+        </div>
       </main>
 
       {/* Mobile bottom nav */}
