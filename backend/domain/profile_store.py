@@ -8,14 +8,11 @@ saved. The user edits their real FTP / pace / CSS / max HR via PUT /profile
 """
 from __future__ import annotations
 from datetime import date
-from pathlib import Path
 
+import apppaths
 from domain.athlete import (
     AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline,
 )
-
-_DATA_DIR = Path(__file__).parent.parent / "data"
-_PROFILE_FILE = _DATA_DIR / "profile.json"
 
 
 def _default_profile() -> AthleteProfile:
@@ -37,21 +34,24 @@ def _default_profile() -> AthleteProfile:
             max_hr=190,                            # PLACEHOLDER
         ),
         fitness=Fitness(ctl=0.0, atl=0.0),
+        onboarding_complete=False,  # the only path that should start the wizard
     )
 
 
 def load_profile() -> AthleteProfile:
     """Load the saved profile, seeding a placeholder on first run."""
-    if _PROFILE_FILE.exists():
-        return AthleteProfile.model_validate_json(_PROFILE_FILE.read_text())
+    profile_file = apppaths.profile_path()
+    if profile_file.exists():
+        return AthleteProfile.model_validate_json(profile_file.read_text())
     profile = _default_profile()
     save_profile(profile)
     return profile
 
 
 def save_profile(profile: AthleteProfile) -> None:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _PROFILE_FILE.write_text(profile.model_dump_json(indent=2))
+    profile_file = apppaths.profile_path()
+    profile_file.parent.mkdir(parents=True, exist_ok=True)
+    profile_file.write_text(profile.model_dump_json(indent=2))
 
 
 def update_fitness(ctl: float, atl: float) -> AthleteProfile:

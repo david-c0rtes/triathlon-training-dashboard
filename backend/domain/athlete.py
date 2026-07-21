@@ -147,3 +147,8 @@ class AthleteProfile(BaseModel):
     thresholds: Thresholds
     fitness: Fitness = Field(default_factory=Fitness)
     preferences: TrainingPreferences = Field(default_factory=TrainingPreferences)
+    # Defaults True so any profile saved before this field existed (or hand-
+    # edited) is grandfathered in as already onboarded — only the freshly
+    # seeded placeholder profile (_default_profile) explicitly sets False.
+    # The frontend always round-trips whatever value is already saved.
+    onboarding_complete: bool = True

@@ -53,6 +53,7 @@ export interface AthleteProfile {
   thresholds: Thresholds;
   fitness: { ctl: number; atl: number };
   preferences: TrainingPreferences;
+  onboarding_complete: boolean;
 }
 
 export interface WorkoutSummary {
@@ -61,6 +62,10 @@ export interface WorkoutSummary {
   date: string;
   duration_min: number;
   planned_tss: number;
+  // present when the workout comes from the stored plan (absent = transient/read-only)
+  id?: string;
+  edited?: boolean;
+  pushed?: boolean;
 }
 
 export interface WeekPlan {

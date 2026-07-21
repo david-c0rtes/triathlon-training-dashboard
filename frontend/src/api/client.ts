@@ -5,7 +5,9 @@ import type {
   PlanRange, GoogleStatus, GooglePushResult,
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+// Empty base = same-origin (the desktop app: FastAPI serves the built SPA).
+// Dev overrides via frontend/.env (VITE_API_BASE=http://localhost:8020).
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const PREFIX = `${API_BASE}/api/v1`;
 
 async function get<T>(path: string): Promise<T> {
@@ -58,7 +60,11 @@ async function put<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`PUT ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    let msg = `PUT ${path} failed: ${res.status}`;
+    try { msg = extractDetail(await res.json(), msg); } catch { /* keep status */ }
+    throw new Error(msg);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -76,6 +82,10 @@ export const api = {
   planRange: (start: string, end: string) => get<PlanRange>(`/plan/range?start=${start}&end=${end}`),
   previewWorkout: (w: WorkoutDetail) => postJson<WorkoutDetail>("/plan/preview", w),
   pushWorkout: (w: WorkoutDetail) => postJson<PushResult>("/garmin/push-workout", w),
+  saveWorkout: (id: string, w: WorkoutDetail) => put<WorkoutDetail>(`/plan/workout/${id}`, w),
+  pushStoredWorkout: (id: string) => post<PushResult>(`/garmin/push-stored/${id}`),
+  editedCount: () => get<{ count: number }>("/plan/edited-count"),
+  regeneratePlan: () => post<{ regenerated: boolean; replaced_edited: number }>("/plan/regenerate"),
 
   googleStatus: () => get<GoogleStatus>("/google/status"),
   googleConnect: () => post<GoogleStatus>("/google/connect"),

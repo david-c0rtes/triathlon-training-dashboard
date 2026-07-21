@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { api } from "../api/client";
 import type {
   NextSession, WorkoutDetail, WorkoutStepDetail, WeekPlan, Sport,
@@ -200,6 +201,8 @@ export function Workout() {
   const [workouts, setWorkouts] = useState<WorkoutDetail[]>([]);
   const [metrics, setMetrics] = useState<Record<number, Metric>>({});
   const [actions, setActions] = useState<Record<number, ActionState>>({});
+  const [saves, setSaves] = useState<Record<number, ActionState>>({});
+  const [dirty, setDirty] = useState<Record<number, boolean>>({});
 
   const workoutsRef = useRef<WorkoutDetail[]>([]);
   const timers = useRef<Record<number, number>>({});
@@ -247,7 +250,29 @@ export function Workout() {
     workoutsRef.current = next;
     setWorkouts(next);
     setActions((a) => (a[idx] ? { ...a, [idx]: { state: "idle" } } : a));
+    setSaves((s) => (s[idx] ? { ...s, [idx]: { state: "idle" } } : s));
+    setDirty((d) => ({ ...d, [idx]: true }));
     schedulePreview(idx, w);
+  }
+
+  /** Persist the workout to the stored plan; returns the saved copy (or null on failure). */
+  async function save(idx: number): Promise<WorkoutDetail | null> {
+    const w = workoutsRef.current[idx];
+    if (!w.id) return w; // transient (outside stored horizon) — nothing to persist
+    setSaves((s) => ({ ...s, [idx]: { state: "working" } }));
+    try {
+      const saved = await api.saveWorkout(w.id, w);
+      const next = [...workoutsRef.current];
+      next[idx] = saved;
+      workoutsRef.current = next;
+      setWorkouts(next);
+      setDirty((d) => ({ ...d, [idx]: false }));
+      setSaves((s) => ({ ...s, [idx]: { state: "done", msg: "Saved" } }));
+      return saved;
+    } catch (e) {
+      setSaves((s) => ({ ...s, [idx]: { state: "error", msg: String(e) } }));
+      return null;
+    }
   }
 
   function patchStep(
@@ -352,11 +377,31 @@ export function Workout() {
 
   async function publish(idx: number) {
     setActions((a) => ({ ...a, [idx]: { state: "working" } }));
-    const w = workoutsRef.current[idx];
+    // Unsaved edits are persisted first, so what lands on Garmin is exactly
+    // what the stored plan says (and the push is recorded against the id).
+    let w = workoutsRef.current[idx];
+    if (w.id && dirty[idx]) {
+      const saved = await save(idx);
+      if (!saved) {
+        setActions((a) => ({ ...a, [idx]: { state: "error", msg: "Fix the save error above first" } }));
+        return;
+      }
+      w = saved;
+    }
     try {
       if (w.sport === "bike_indoor") {
         await api.downloadZwo(w);
         setActions((a) => ({ ...a, [idx]: { state: "done", msg: "Downloaded .zwo" } }));
+      } else if (w.id) {
+        const r = await api.pushStoredWorkout(w.id);
+        const next = [...workoutsRef.current];
+        next[idx] = { ...w, pushed: true };
+        workoutsRef.current = next;
+        setWorkouts(next);
+        setActions((a) => ({
+          ...a,
+          [idx]: { state: "done", msg: r.replaced_previous ? "Re-published (replaced previous)" : "Published to Garmin" },
+        }));
       } else {
         await api.pushWorkout(w);
         setActions((a) => ({ ...a, [idx]: { state: "done", msg: "Published to Garmin" } }));
@@ -405,11 +450,14 @@ export function Workout() {
         <div className="lg:col-span-2 flex flex-col gap-6">
           {workouts.map((w, i) => (
             <WorkoutEditor
-              key={i}
+              key={w.id ?? i}
               w={w}
               zones={zones}
               metric={metrics[i]}
               action={actions[i]}
+              saveState={saves[i]}
+              isDirty={!!dirty[i]}
+              onSave={() => save(i)}
               onTitle={(title) => patchWorkout(i, { title })}
               onSport={(sport) => changeSport(i, sport)}
               onDate={(date) => patchWorkout(i, { date })}
@@ -437,13 +485,16 @@ export function Workout() {
 // ── workout card ────────────────────────────────────────────────────────────
 
 function WorkoutEditor({
-  w, zones, metric, action, onTitle, onSport, onDate, onStep, onBlockType, onBlockRepeat,
-  onBlockDelete, onBlockMove, onInnerMove, onAddBlock, onPublish,
+  w, zones, metric, action, saveState, isDirty, onSave, onTitle, onSport, onDate, onStep,
+  onBlockType, onBlockRepeat, onBlockDelete, onBlockMove, onInnerMove, onAddBlock, onPublish,
 }: {
   w: WorkoutDetail;
   zones: ZonesResponse | null;
   metric?: Metric;
   action?: ActionState;
+  saveState?: ActionState;
+  isDirty: boolean;
+  onSave: () => void;
   onTitle: (t: string) => void;
   onSport: (s: Sport) => void;
   onDate: (date: string) => void;
@@ -488,6 +539,9 @@ function WorkoutEditor({
                 {SPORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               <span className="font-mono text-[11px] text-outline">→ {exportHint}</span>
+              {isDirty && <Chip color="#ffd34f">unsaved</Chip>}
+              {!isDirty && w.edited && <Chip color="#4fdbc8">edited</Chip>}
+              {w.pushed && <Chip color="#adc6ff">on Garmin</Chip>}
             </div>
           </div>
         </div>
@@ -568,22 +622,38 @@ function WorkoutEditor({
 
       {/* action footer */}
       <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-outline-variant/30">
+        {w.id && (
+          <button
+            onClick={onSave}
+            disabled={saveState?.state === "working" || !isDirty || !!invalid}
+            className="mt-3 rounded-btn border border-primary/60 text-primary font-mono text-sm font-medium px-4 py-2 hover:bg-primary/10 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            title={invalid ? "Fix the issue above before saving" : "Persist your edits to the plan"}
+          >
+            {saveState?.state === "working" ? "Saving…" : "Save changes"}
+          </button>
+        )}
         {exportable ? (
           <button
             onClick={onPublish}
-            disabled={action?.state === "working" || !!invalid}
+            disabled={action?.state === "working" || saveState?.state === "working" || !!invalid}
             className="mt-3 rounded-btn bg-primary text-on-primary font-mono text-sm font-medium px-4 py-2 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition"
             title={invalid ? "Fix the issue above before publishing" : undefined}
           >
             {action?.state === "working"
               ? isIndoor ? "Preparing…" : "Publishing…"
-              : isIndoor ? "Download .zwo" : "Publish to Garmin"}
+              : isIndoor ? "Download .zwo" : w.pushed ? "Re-publish to Garmin" : "Publish to Garmin"}
           </button>
         ) : (
           <span className="mt-3 font-mono text-xs text-outline">
             {w.sport === "brick" ? "Brick/multisport export not supported yet."
               : "Strength sessions aren't exported as structured workouts."}
           </span>
+        )}
+        {saveState?.state === "done" && (
+          <span className="mt-3 font-mono text-xs text-secondary">✓ {saveState.msg}</span>
+        )}
+        {saveState?.state === "error" && (
+          <span className="mt-3 font-mono text-xs text-error">{saveState.msg}</span>
         )}
         {action?.state === "done" && (
           <span className="mt-3 font-mono text-xs text-secondary">✓ {action.msg}</span>
@@ -679,6 +749,17 @@ function BlockEditor({
               onChange={(patch) => onStep(topIdx, null, patch)} />}
       </div>
     </div>
+  );
+}
+
+function Chip({ color, children }: { color: string; children: ReactNode }) {
+  return (
+    <span
+      className="font-mono text-[10px] uppercase tracking-wider rounded-full px-2 py-0.5 border"
+      style={{ color, borderColor: color + "66", backgroundColor: color + "1a" }}
+    >
+      {children}
+    </span>
   );
 }
 

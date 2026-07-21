@@ -15,12 +15,24 @@ Setup (user, one time):
 """
 from __future__ import annotations
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
-_SECRETS_DIR = Path(__file__).parent.parent.parent / ".secrets"
-_CLIENT_SECRET = _SECRETS_DIR / "google_client_secret.json"
-_TOKEN = _SECRETS_DIR / "google_token.json"
-_CAL_ID_FILE = _SECRETS_DIR / "google_calendar_id.txt"
+import apppaths
+
+
+def _secrets_dir():
+    return apppaths.google_secrets_dir()
+
+
+def _client_secret_path():
+    return _secrets_dir() / "google_client_secret.json"
+
+
+def _token_path():
+    return _secrets_dir() / "google_token.json"
+
+
+def _cal_id_path():
+    return _secrets_dir() / "google_calendar_id.txt"
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 _CALENDAR_NAME = "TriFlow Training"
@@ -29,14 +41,14 @@ _TAG = "triflow"  # extendedProperties key marking events this app created
 
 def is_configured() -> bool:
     """True once the user has dropped in their OAuth client secret."""
-    return _CLIENT_SECRET.exists()
+    return _client_secret_path().exists()
 
 
 def status() -> dict:
     """Lightweight connection status for the UI (no network call beyond a refresh)."""
     configured = is_configured()
     connected = False
-    if configured and _TOKEN.exists():
+    if configured and _token_path().exists():
         try:
             _load_service()
             connected = True
@@ -53,16 +65,16 @@ def connect() -> None:
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     if not is_configured():
-        raise RuntimeError("Missing backend/.secrets/google_client_secret.json.")
-    flow = InstalledAppFlow.from_client_secrets_file(str(_CLIENT_SECRET), SCOPES)
+        raise RuntimeError(f"Missing {_client_secret_path()}.")
+    flow = InstalledAppFlow.from_client_secrets_file(str(_client_secret_path()), SCOPES)
     creds = flow.run_local_server(port=0)
-    _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    _TOKEN.write_text(creds.to_json())
+    _secrets_dir().mkdir(parents=True, exist_ok=True)
+    _token_path().write_text(creds.to_json())
 
 
 def disconnect() -> None:
     """Forget the cached token (and calendar id) — user must reconnect to push again."""
-    for f in (_TOKEN, _CAL_ID_FILE):
+    for f in (_token_path(), _cal_id_path()):
         f.unlink(missing_ok=True)
 
 
@@ -72,13 +84,13 @@ def _load_service():
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
 
-    if not _TOKEN.exists():
+    if not _token_path().exists():
         raise RuntimeError("Google Calendar not connected — connect first.")
-    creds = Credentials.from_authorized_user_file(str(_TOKEN), SCOPES)
+    creds = Credentials.from_authorized_user_file(str(_token_path()), SCOPES)
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            _TOKEN.write_text(creds.to_json())
+            _token_path().write_text(creds.to_json())
         else:
             raise RuntimeError("Google Calendar token invalid — reconnect.")
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
@@ -94,15 +106,15 @@ def _account_timezone(service) -> str:
 
 def _training_calendar_id(service) -> str:
     """Find (or create) the dedicated 'TriFlow Training' calendar; cache its id."""
-    if _CAL_ID_FILE.exists():
-        return _CAL_ID_FILE.read_text().strip()
+    if _cal_id_path().exists():
+        return _cal_id_path().read_text().strip()
 
     page = None
     while True:
         resp = service.calendarList().list(pageToken=page).execute()
         for item in resp.get("items", []):
             if item.get("summary") == _CALENDAR_NAME:
-                _CAL_ID_FILE.write_text(item["id"])
+                _cal_id_path().write_text(item["id"])
                 return item["id"]
         page = resp.get("nextPageToken")
         if not page:
@@ -115,8 +127,8 @@ def _training_calendar_id(service) -> str:
         "description": "Workouts planned in TriFlow.",
         "timeZone": _account_timezone(service),
     }).execute()
-    _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    _CAL_ID_FILE.write_text(created["id"])
+    _secrets_dir().mkdir(parents=True, exist_ok=True)
+    _cal_id_path().write_text(created["id"])
     return created["id"]
 
 

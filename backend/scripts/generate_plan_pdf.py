@@ -21,8 +21,8 @@ from reportlab.platypus import (
 
 from domain.profile_store import load_profile
 from domain.zones import compute_zones
-from domain.periodization import generate_week
 from domain.athlete import RACE_TYPES
+from services.plan_service import ensure_plan, week_details
 
 OUT_DIR = r"C:\Users\david\Downloads"
 
@@ -186,37 +186,41 @@ def build_pdf(test_mode: bool = False) -> None:
         f"Generated {today.strftime('%B %d, %Y')} — every planned session from today through race day.",
         styles["Normal"]))
     story.append(Paragraph(
-        "Note: this plan is fitness-adaptive. Weeks are projected from today's CTL/ATL/TSB and the "
-        "current profile settings; they will re-adjust automatically as real training data comes in "
-        "via Garmin sync. Treat this as a snapshot, not a fixed prescription.", meta_style))
+        "This is your STORED plan — exactly what the app shows, including any manual edits. "
+        "Future weeks rebuild automatically if you change race/thresholds/hours in Settings.",
+        meta_style))
     story.append(Spacer(1, 12))
+
+    ensure_plan(profile)  # materialize any missing weeks before reading
 
     total_workouts = 0
     weeks_done = 0
     while week_start <= race_date:
-        wk = generate_week(profile, week_start=week_start)
+        wk = week_details(profile, week_start)
+        if wk is None:  # outside the stored horizon (shouldn't happen mid-plan)
+            week_start += timedelta(days=7)
+            continue
         story.append(Paragraph(
-            f"Week of {week_start.strftime('%B %d, %Y')} — {wk.phase.value} phase — "
-            f"target {wk.target_tss:.0f} TSS ({wk.planned_tss:.0f} planned)",
+            f"Week of {week_start.strftime('%B %d, %Y')} — {wk['phase']} phase — "
+            f"target {wk['target_tss']:.0f} TSS ({wk['planned_tss']:.0f} planned)",
             week_style))
-        story.append(Paragraph(wk.rationale, meta_style))
+        story.append(Paragraph(wk["rationale"], meta_style))
 
-        by_day: dict[date, list] = {}
-        for w in wk.workouts:
-            by_day.setdefault(w.scheduled_date, []).append(w)
+        by_day: dict[str, list] = {}
+        for d in wk["workouts"]:
+            by_day.setdefault(d["date"], []).append(d)
 
         for i in range(7):
             day = week_start + timedelta(days=i)
             if day < today or day > race_date:
                 continue
             story.append(Paragraph(day.strftime("%A %d %B, %Y:"), date_style))
-            sessions = by_day.get(day, [])
+            sessions = by_day.get(day.isoformat(), [])
             if not sessions:
                 story.append(Paragraph("Rest day", rest_style))
                 continue
-            for w in sessions:
+            for d in sessions:
                 total_workouts += 1
-                d = w.detail()
                 story.append(Paragraph(d["title"], workout_style))
                 story.append(Paragraph(
                     f"{SPORT_LABEL.get(d['sport'], d['sport'])} · {d['duration_min']} min · "

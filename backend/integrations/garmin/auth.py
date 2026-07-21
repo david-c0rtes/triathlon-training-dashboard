@@ -1,10 +1,13 @@
 from __future__ import annotations
 import os
-from pathlib import Path
 
 from garminconnect import Garmin
 
-_TOKEN_DIR = Path(__file__).parent.parent.parent / ".tokens" / "garmin"
+import apppaths
+
+
+def _token_dir():
+    return apppaths.garmin_token_dir()
 
 
 def _credentials() -> tuple[str, str]:
@@ -26,10 +29,11 @@ def get_client() -> Garmin:
     In garminconnect 0.3.x the garth session is stored at client.client (not
     client.garth), and login() accepts tokenstore as a keyword argument.
     """
-    tokenstore = str(_TOKEN_DIR)
+    token_dir = _token_dir()
+    tokenstore = str(token_dir)
 
     # Try to resume an existing session first
-    if _TOKEN_DIR.exists():
+    if token_dir.exists():
         try:
             client = Garmin()
             client.login(tokenstore=tokenstore)
@@ -42,11 +46,12 @@ def get_client() -> Garmin:
     client.login()
 
     # Persist session tokens so future calls skip the password login
-    _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    token_dir.mkdir(parents=True, exist_ok=True)
     client.client.dump(tokenstore)
     return client
 
 
 def is_authenticated() -> bool:
     """True if saved Garmin session tokens exist on disk."""
-    return _TOKEN_DIR.exists() and any(_TOKEN_DIR.iterdir())
+    token_dir = _token_dir()
+    return token_dir.exists() and any(token_dir.iterdir())

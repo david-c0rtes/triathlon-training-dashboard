@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from domain.profile_store import load_profile
 from domain.workout import Workout
-from api.routes import workouts_in_range
+from services.plan_service import range_workouts
 from integrations.google import calendar as gcal
 
 router = APIRouter(prefix="/api/v1/google")
@@ -42,7 +42,7 @@ def google_push(start: date, end: date):
     if not gcal.is_configured():
         raise HTTPException(status_code=400, detail="Google Calendar isn't set up yet.")
     profile = load_profile()
-    workouts = workouts_in_range(profile, start, end)
+    workouts = range_workouts(profile, start, end)
     payload = [{
         "date": w.scheduled_date.isoformat(),
         "title": w.title,

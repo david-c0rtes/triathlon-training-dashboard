@@ -10,8 +10,10 @@ from integrations.garmin.zwo import workout_to_zwo, zwo_filename
 from integrations.garmin.tss import measured_tss_per_hour, daily_tss_by_group
 from domain.fitness import compute_fitness, compute_fitness_series, activities_to_daily_tss
 from domain.profile_store import load_profile, save_profile, update_fitness
-from domain.workout import Sport
-from api.routes import sessions_for_date, WorkoutIn, with_anchors
+from domain.workout import Sport, Workout
+from domain import plan_store
+from services import plan_service
+from api.routes import WorkoutIn, with_anchors
 
 router = APIRouter(prefix="/api/v1/garmin")
 
@@ -126,6 +128,28 @@ def garmin_history(days: int = 90):
 
 # ── workout export ─────────────────────────────────────────────────────────────
 
+def _push_recorded(workout_id: str | None, w: Workout, thresholds) -> dict:
+    """
+    Push to Garmin, idempotently for stored workouts: if this workout was
+    pushed before, its previous Garmin copy is deleted first so re-publishing
+    never piles up duplicates. The new Garmin id is recorded in the store.
+    """
+    replaced = False
+    if workout_id:
+        row = plan_store.get_workout(workout_id)
+        if row is not None and row["garmin_workout_id"]:
+            try:
+                garmin_auth.get_client().delete_workout(row["garmin_workout_id"])
+                replaced = True
+            except Exception:
+                pass  # already deleted on Garmin's side — push fresh
+    result = push_workout(w, thresholds)
+    if workout_id and result.get("workout_id"):
+        plan_store.mark_pushed(workout_id, result["workout_id"])
+    result["replaced_previous"] = replaced
+    return result
+
+
 @router.post("/push")
 def garmin_push(day: date):
     """
@@ -134,24 +158,50 @@ def garmin_push(day: date):
     brick/multisport is not supported yet.
     """
     profile = load_profile()
-    sessions = sessions_for_date(profile, day)
+    sessions = plan_service.day_workouts(profile, day)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"No planned session on {day.isoformat()}")
 
     results = []
-    for w in sessions:
+    for workout_id, w in sessions:
         if w.sport == Sport.BIKE_INDOOR:
             results.append({"title": w.title, "skipped": "indoor cycling — use GET /garmin/zwo/{date}"})
             continue
-        if w.sport == Sport.BRICK:
-            results.append({"title": w.title, "skipped": "brick/multisport not supported yet"})
+        if w.sport in (Sport.BRICK, Sport.STRENGTH):
+            results.append({"title": w.title, "skipped": f"{w.sport.value} isn't pushed to Garmin"})
             continue
         try:
-            results.append(push_workout(w, profile.thresholds))
+            results.append(_push_recorded(workout_id, w, profile.thresholds))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Garmin push error for '{w.title}': {e}")
 
     return {"date": day.isoformat(), "results": results}
+
+
+@router.post("/push-stored/{workout_id}")
+def garmin_push_stored(workout_id: str):
+    """
+    Publish a stored (possibly edited) workout by id — the editor's Publish
+    button. Re-publishing replaces the previous Garmin copy instead of
+    duplicating it.
+    """
+    profile = load_profile()
+    row = plan_store.get_workout(workout_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No stored workout with id {workout_id}")
+    w = with_anchors(Workout.model_validate_json(row["workout_json"]), profile)
+    if w.sport == Sport.BIKE_INDOOR:
+        raise HTTPException(status_code=400, detail="Indoor cycling exports as .zwo — use POST /garmin/zwo-file.")
+    if w.sport == Sport.BRICK:
+        raise HTTPException(status_code=400, detail="Brick/multisport push not supported yet.")
+    if w.sport == Sport.STRENGTH:
+        raise HTTPException(status_code=400, detail="Strength sessions aren't pushed to Garmin as structured workouts.")
+    try:
+        return _push_recorded(workout_id, w, profile.thresholds)
+    except EnvironmentError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Garmin push error: {e}")
 
 
 @router.post("/push-workout")
@@ -194,8 +244,8 @@ def garmin_zwo_file(workout: WorkoutIn):
 def garmin_zwo(day: date):
     """Download the .zwo file for the indoor cycling session on `day`."""
     profile = load_profile()
-    sessions = sessions_for_date(profile, day)
-    indoor = [w for w in sessions if w.sport == Sport.BIKE_INDOOR]
+    sessions = plan_service.day_workouts(profile, day)
+    indoor = [w for _, w in sessions if w.sport == Sport.BIKE_INDOOR]
     if not indoor:
         raise HTTPException(status_code=404, detail=f"No indoor cycling session on {day.isoformat()}")
 

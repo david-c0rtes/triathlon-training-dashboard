@@ -5,11 +5,13 @@ from pydantic import BaseModel, model_validator
 
 from domain.athlete import AthleteProfile, Goals, Thresholds, Fitness, RaceGoal, Discipline, RACE_TYPES
 from domain.zones import compute_zones, AthleteZones, Zone
-from domain.periodization import generate_week, generate_plan, get_phase, WeekPlan
+from domain.periodization import get_phase
 from domain.workout import (
     Workout, WorkoutStep, RepeatBlock, Target, TargetType, Sport, validate_workout,
 )
 from domain.profile_store import load_profile, save_profile
+from domain.plan_store import profile_fingerprint
+from services import plan_service
 
 router = APIRouter(prefix="/api/v1")
 
@@ -136,8 +138,16 @@ def get_profile():
 
 @router.put("/profile", response_model=AthleteProfile)
 def put_profile(profile: AthleteProfile):
-    """Replace the saved profile (goals + thresholds + fitness) and persist it."""
+    """
+    Replace the saved profile and persist it. If a plan-affecting field changed
+    (race, thresholds, hours, sport split — NOT fitness), the stored plan's
+    future weeks are regenerated automatically; the frontend warns beforehand
+    when manual edits would be discarded (GET /plan/edited-count).
+    """
+    old_fingerprint = profile_fingerprint(load_profile())
     save_profile(profile)
+    if profile_fingerprint(profile) != old_fingerprint:
+        plan_service.regenerate_future(profile)
     return profile
 
 
@@ -164,58 +174,30 @@ def get_zones():
 
 
 @router.get("/plan/week")
-def get_week_plan(week_start: date | None = None, week_number: int = 1):
+def get_week_plan(week_start: date | None = None):
     profile = load_profile()
-    plan = generate_week(profile, week_start=week_start, week_number=week_number)
-    return plan.summary()
+    return plan_service.week_view(profile, week_start=week_start)
 
 
 @router.get("/plan/full")
 def get_full_plan():
     """Full periodized plan from this week to race day (week-level summaries)."""
     profile = load_profile()
-    return generate_plan(profile).summary()
-
-
-def sessions_for_date(profile: AthleteProfile, d: date) -> list[Workout]:
-    """Generate the plan week containing `d` and return that day's session(s)."""
-    week_start = d - timedelta(days=d.weekday())
-    plan = generate_week(profile, week_start=week_start)
-    return [w for w in plan.workouts if w.scheduled_date == d]
-
-
-def workouts_in_range(profile: AthleteProfile, start: date, end: date) -> list[Workout]:
-    """All planned workouts scheduled within [start, end], generated week-by-week."""
-    if end < start:
-        start, end = end, start
-    if (end - start).days > 180:
-        end = start + timedelta(days=180)  # cap to keep generation bounded
-    out: list[Workout] = []
-    wk = start - timedelta(days=start.weekday())  # Monday of the first week
-    while wk <= end:
-        for w in generate_week(profile, week_start=wk).workouts:
-            if start <= w.scheduled_date <= end:
-                out.append(w)
-        wk += timedelta(days=7)
-    return out
+    return plan_service.full_plan_view(profile)
 
 
 @router.get("/plan/range")
 def get_plan_range(start: date, end: date):
     """Day-by-day workout summaries across a date range — powers the calendar grid."""
     profile = load_profile()
-    days: dict[str, list[dict]] = {}
-    for w in workouts_in_range(profile, start, end):
-        days.setdefault(w.scheduled_date.isoformat(), []).append(w.summary())
-    return {"days": [{"date": d, "sessions": s} for d, s in sorted(days.items())]}
+    return plan_service.range_days(profile, start, end)
 
 
 @router.get("/plan/day")
 def get_day_plan(day: date):
     """Full structured detail of the session(s) on a given date (review screen)."""
     profile = load_profile()
-    sessions = sessions_for_date(profile, day)
-    return {"date": day.isoformat(), "sessions": [w.detail() for w in sessions]}
+    return {"date": day.isoformat(), "sessions": plan_service.day_sessions(profile, day)}
 
 
 @router.get("/plan/next")
@@ -226,13 +208,30 @@ def get_next_plan():
     Workout review/edit screen.
     """
     profile = load_profile()
-    today = date.today()
-    for offset in range(0, 21):
-        d = today + timedelta(days=offset)
-        sessions = sessions_for_date(profile, d)
-        if sessions:
-            return {"date": d.isoformat(), "sessions": [w.detail() for w in sessions]}
-    return {"date": None, "sessions": []}
+    return plan_service.next_session_day(profile)
+
+
+@router.put("/plan/workout/{workout_id}")
+def put_workout(workout_id: str, workout: WorkoutIn):
+    """Persist an edited workout so it survives reloads and feeds the stored plan."""
+    profile = load_profile()
+    saved = plan_service.save_workout_edit(profile, workout_id, workout.to_domain())
+    if saved is None:
+        raise HTTPException(status_code=404, detail=f"No stored workout with id {workout_id}")
+    return saved
+
+
+@router.get("/plan/edited-count")
+def get_edited_count():
+    """How many manually-edited future workouts a regeneration would discard."""
+    return {"count": plan_service.edited_future_count()}
+
+
+@router.post("/plan/regenerate")
+def post_regenerate():
+    """Rebuild future weeks from the engine (discards future edits; keeps past days)."""
+    profile = load_profile()
+    return plan_service.regenerate_future(profile)
 
 
 @router.post("/plan/preview")
@@ -251,8 +250,7 @@ def get_tomorrow_plan():
     """Tomorrow's session(s) — the review-before-publish view."""
     profile = load_profile()
     tomorrow = date.today() + timedelta(days=1)
-    sessions = sessions_for_date(profile, tomorrow)
-    return {"date": tomorrow.isoformat(), "sessions": [w.detail() for w in sessions]}
+    return {"date": tomorrow.isoformat(), "sessions": plan_service.day_sessions(profile, tomorrow)}
 
 
 @router.get("/plan/phase")
@@ -274,12 +272,13 @@ def get_insights():
             detail="AI insights unavailable — set ANTHROPIC_API_KEY in backend/.env",
         )
     profile = load_profile()
-    week = generate_week(profile)
+    week = plan_service.week_view(profile)
     context = {
-        "ctl": week.ctl, "atl": week.atl, "tsb": round(week.tsb, 1),
-        "phase": week.phase.value, "weeks_to_race": round(week.weeks_to_race, 1),
-        "target_tss": week.target_tss, "planned_tss": week.planned_tss,
-        "rationale": week.rationale,
+        "ctl": week["fitness"]["ctl"], "atl": week["fitness"]["atl"],
+        "tsb": week["fitness"]["tsb"],
+        "phase": week["phase"], "weeks_to_race": week["weeks_to_race"],
+        "target_tss": week["target_tss"], "planned_tss": week["planned_tss"],
+        "rationale": week["rationale"],
     }
     try:
         insight = generate_insight(context)
