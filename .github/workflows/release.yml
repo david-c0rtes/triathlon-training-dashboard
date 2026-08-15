@@ -1,0 +1,96 @@
+name: Release
+
+# Builds the Windows installer and publishes it to a GitHub Release whenever
+# you push a version tag (e.g. v0.1.0). This is the whole distribution path:
+# tag -> CI builds on a clean Windows machine -> installer lands on the repo's
+# Releases page, where update_check.py (and your users) find it.
+#
+# Release ritual:
+#   1. Bump VERSION in backend/version.py
+#   2. git commit -am "Release 0.1.0"
+#   3. git tag v0.1.0 && git push origin main --tags
+#   The tag MUST match version.py or the build fails loudly (guard step below).
+#
+# You can also run it manually (Actions tab -> Release -> Run workflow) to
+# verify the build without publishing anything — it just uploads the installer
+# as a downloadable build artifact in that case.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # required to create the GitHub Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash # forward slashes + one consistent shell on the Windows runner
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # Recreate the same .venv layout build_desktop.py expects locally
+      # (it looks for pyinstaller.exe next to python.exe, i.e. inside .venv).
+      - name: Install Python dependencies
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade pip
+          .venv/Scripts/python -m pip install -r requirements.txt pyinstaller
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Verify tag matches version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: backend
+        run: |
+          VERSION=$(.venv/Scripts/python -c "from version import VERSION; print(VERSION)")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version.py = $VERSION   tag = $TAG"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version.py ($VERSION). Bump version.py or retag."
+            exit 1
+          fi
+
+      - name: Build installer
+        working-directory: backend
+        run: .venv/Scripts/python -m scripts.build_desktop
+
+      - name: Upload installer as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TriFlow-Setup
+          path: backend/installer_output/*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            backend/installer_output/*.exe \
+            --title "TriFlow $GITHUB_REF_NAME" \
+            --generate-notes \
+            --latest
