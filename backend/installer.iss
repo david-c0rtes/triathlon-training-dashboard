@@ -32,6 +32,7 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\TriFlow.exe
+SetupIconFile=assets\triflow.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

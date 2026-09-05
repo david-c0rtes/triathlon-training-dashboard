@@ -46,7 +46,7 @@ exe = EXE(
     exclude_binaries=True,
     name="TriFlow",
     console=False,  # windowed app — no terminal
-    icon=None,      # TODO: add an .ico when brand assets exist
+    icon=str(BACKEND / "assets" / "triflow.ico"),  # white glyph on brand-navy tile
 )
 
 coll = COLLECT(
